@@ -1,0 +1,24 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install pinned Lean toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o /tmp/elan-init.sh
+          sh /tmp/elan-init.sh -y --no-modify-path --default-toolchain leanprover/lean4:v4.35.0
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - run: npm ci
+      - run: npm test
+      - run: npm run verify:architectures
+      - run: npm run typecheck:architectures
+      - run: npm run verify:example
+      - run: npm run verify:payments
+      - run: npm run typecheck:payments
+      - run: npm pack --dry-run

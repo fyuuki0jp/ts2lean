@@ -1,0 +1,83 @@
+{
+  "name": "ts2lean",
+  "version": "0.1.0",
+  "description": "Verify TypeScript functions and transactional ledger services against Lean 4 contracts",
+  "type": "module",
+  "bin": {
+    "ts2lean": "dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./vite": {
+      "types": "./dist/vite.d.ts",
+      "import": "./dist/vite.js"
+    },
+    "./vitest": {
+      "types": "./dist/vitest.d.ts",
+      "import": "./dist/vitest.js"
+    },
+    "./runtime": {
+      "types": "./dist/runtime.d.ts",
+      "import": "./dist/runtime.js"
+    }
+  },
+  "files": [
+    "dist",
+    "lean",
+    "lean-toolchain",
+    "README.md",
+    "docs"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "build": "node node_modules/typescript/bin/tsc -p tsconfig.json",
+    "test": "npm run build && npm run test:types && node --test --test-concurrency=1 test/*.test.mjs",
+    "verify:example": "vitest run --config examples/balance/vitest.config.ts",
+    "prepack": "npm run build",
+    "test:types": "node node_modules/typescript/bin/tsc -p test/tsconfig.json",
+    "verify:payments": "vitest run --config examples/payments/vitest.config.ts",
+    "test:payments": "npm run build && node --test --test-concurrency=1 test/completion.test.mjs test/payments.test.mjs && npm run verify:payments",
+    "typecheck:payments": "tsc -p examples/payments/tsconfig.json --runExternalCode",
+    "test:semantics": "npm run build && node --test test/completion.test.mjs",
+    "verify:architectures": "vitest run --config examples/architectures/vitest.config.ts",
+    "test:architectures": "npm run build && node --test test/architecture.test.mjs && npm run verify:architectures",
+    "typecheck:architectures": "tsc -p examples/architectures/tsconfig.json --runExternalCode"
+  },
+  "typescript": {
+    "contentMapper": {
+      "exec": [
+        "node",
+        "dist/mapper.js"
+      ],
+      "dynamicConfig": true
+    }
+  },
+  "dependencies": {
+    "@ts-morph/common": "0.28.1",
+    "magic-string": "0.30.21"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.0",
+    "typescript": "7.1.0-beta",
+    "vite": "8.3.5",
+    "vitest": "5.0.5"
+  },
+  "license": "MIT",
+  "peerDependencies": {
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5"
+  },
+  "peerDependenciesMeta": {
+    "vite": {
+      "optional": true
+    },
+    "vitest": {
+      "optional": true
+    }
+  }
+}

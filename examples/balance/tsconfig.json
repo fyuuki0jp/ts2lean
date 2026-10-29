@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "verbatimModuleSyntax": true,
+    "outDir": ".ts2lean/js",
+    "types": ["node"]
+  },
+  "contentMappers": [
+    {
+      "package": "ts2lean",
+      "extensions": [".lean"]
+    }
+  ],
+  "include": ["balance.ts", "balance.test.ts"]
+}

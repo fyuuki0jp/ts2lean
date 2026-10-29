@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.tools/
+.ts2lean/
+.lake/
+*.olean
+*.ilean
+.DS_Store
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
