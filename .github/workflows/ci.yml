@@ -16,6 +16,7 @@ jobs:
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
       - run: npm ci
       - run: npm test
+      - run: npm run test:differential
       - run: npm run verify:architectures
       - run: npm run typecheck:architectures
       - run: npm run verify:example

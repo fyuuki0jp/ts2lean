@@ -198,13 +198,20 @@ export function ts2lean(
       const refs = (
         body: ts.Node,
         owner?: FunctionNode,
+        data = false,
       ): Map<string, string> => {
         const out = new Map<string, string>();
         const visit = (n: ts.Node): void => {
           if (isFunctionNode(n)) return;
-          if (ts.isCallExpression(n)) {
-            const root = rootName(n.expression),
-              r = reference(n.expression);
+          if (
+            ts.isCallExpression(n) ||
+            (data && (ts.isIdentifier(n) || ts.isPropertyAccessExpression(n)))
+          ) {
+            const expr = ts.isCallExpression(n)
+              ? n.expression
+              : (n as ts.Expression);
+            const root = rootName(expr),
+              r = reference(expr);
             let local = false;
             if (owner && root)
               for (
@@ -236,7 +243,7 @@ export function ts2lean(
                   local = true;
                 if (scope === owner) break;
               }
-            if (root && r && !local) out.set(n.expression.getText(), r);
+            if (root && r && !local) out.set(expr.getText(), r);
           }
           ts.forEachChild(n, visit);
         };
@@ -296,7 +303,7 @@ export function ts2lean(
             ? "default"
             : name
           : undefined;
-        return `{...${JSON.stringify({ module: file, export: exported, name, hash })},callees:()=>({${record(refs(fn.body!, fn))}}),objects:()=>({${[...objects].map((n) => `[${JSON.stringify(n)}]:${n}`).join(",")}})}`;
+        return `{...${JSON.stringify({ module: file, export: exported, name, hash })},callees:()=>({${record(refs(fn.body!, fn))}}),captures:()=>({${record(refs(fn.body!, fn, true))}}),objects:()=>({${[...objects].map((n) => `[${JSON.stringify(n)}]:${n}`).join(",")}})}`;
       };
       for (const fn of functions) {
         if (

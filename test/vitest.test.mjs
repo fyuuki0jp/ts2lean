@@ -258,3 +258,41 @@ test("factory source changes invalidate the closure",async()=>{
     await f.cleanup();
   }
 });
+
+test("scalar DI checks live configuration and captured snapshots", async () => {
+  const f = await fixture(
+    `
+type Config={readonly offset:bigint;readonly enabled:boolean};
+function live(c:Config){return (x:bigint):bigint=>c.enabled?x+c.offset:x;}
+function snapshot({offset}:Config){return (x:bigint):bigint=>x+offset;}
+export const config:Config={offset:1n,enabled:true};
+export const run=live(config);
+export const snap=snapshot(config);
+export const wrong=live({offset:2n,enabled:true});
+`,
+    intSpec,
+  );
+  try {
+    await prepare(f);
+    await writeFile(
+      path.join(f.dir, "binding.test.ts"),
+      `
+import {expect,test} from 'vitest';import 'ts2lean/vitest';
+import {run,snap,wrong,config} from './main.ts';import {contract} from './Spec.lean';
+test('config specialization',async()=>{await expect(run).toVerify(contract);await expect(expect(wrong).toVerify(contract)).rejects.toMatchObject({result:{status:'unproved'}});});
+test('live value changes fail but snapshots retain their captured value',async()=>{
+ const d=Object.getOwnPropertyDescriptor(config,'offset')!;Object.defineProperty(config,'offset',{...d,value:2n});
+ try{await expect(expect(run).toVerify(contract)).rejects.toThrow(/Captured setting changed/);await expect(snap).toVerify(contract);}finally{Object.defineProperty(config,'offset',d);}
+});
+test('configuration getter is not executed',async()=>{
+ const d=Object.getOwnPropertyDescriptor(config,'offset')!;let reads=0;Object.defineProperty(config,'offset',{configurable:true,get(){reads++;return 1n;}});
+ try{await expect(expect(run).toVerify(contract)).rejects.toThrow(/accessor/);expect(reads).toBe(0);}finally{Object.defineProperty(config,'offset',d);}
+});
+`,
+    );
+    const result = await vitest(f);
+    assert.equal(result.code, 0, result.output);
+  } finally {
+    await f.cleanup();
+  }
+});

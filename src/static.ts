@@ -33,7 +33,12 @@ export interface StaticObject {
   kind: "object";
   fields: Map<string, StaticValue>;
 }
-export type StaticValue = StaticFunction | StaticObject;
+export interface StaticScalar {
+  kind: "scalar";
+  type: "int" | "bool";
+  value: string;
+}
+export type StaticValue = StaticFunction | StaticObject | StaticScalar;
 export type StaticEnv = Map<ts.Symbol, StaticValue>;
 export interface CompositionCheck {
   source: string;
@@ -163,6 +168,30 @@ export function staticResolver(
   ): StaticValue => {
     if (ts.isParenthesizedExpression(n) || ts.isSatisfiesExpression(n))
       return resolve(n.expression, env);
+    if (ts.isBigIntLiteral(n))
+      return {
+        kind: "scalar",
+        type: "int",
+        value: BigInt(n.text.replaceAll("_", "").slice(0, -1)).toString(),
+      };
+    if (
+      n.kind === ts.SyntaxKind.TrueKeyword ||
+      n.kind === ts.SyntaxKind.FalseKeyword
+    )
+      return {
+        kind: "scalar",
+        type: "bool",
+        value: n.kind === ts.SyntaxKind.TrueKeyword ? "true" : "false",
+      };
+    if (
+      ts.isPrefixUnaryExpression(n) &&
+      n.operator === ts.SyntaxKind.MinusToken
+    ) {
+      const v = resolve(n.operand, env);
+      if (v.kind === "scalar" && v.type === "int")
+        return { ...v, value: (-BigInt(v.value)).toString() };
+      return fail(n, "Expected integer constant");
+    }
     if (ts.isIdentifier(n)) return resolveSymbol(symbol(n), n, env);
     if (ts.isPropertyAccessExpression(n)) {
       // Namespace imports and reexports are resolved by the TypeScript symbol graph.
@@ -276,7 +305,7 @@ export function staticResolver(
     }
     return fail(
       n,
-      `Not a static dependency: ${ts.SyntaxKind[n.kind]}. Runtime selection, scalar captures, and containers are unsupported`,
+      `Not a static dependency: ${ts.SyntaxKind[n.kind]}. Runtime selection and containers are unsupported`,
     );
   };
   return { resolve, resolveSymbol, symbol, member, checks, validateFunction };

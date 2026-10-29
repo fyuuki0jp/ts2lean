@@ -25,6 +25,7 @@ export type Term =
   | { kind: "if"; condition: Expr; yes: Term; no: Term };
 export interface FunctionIR {
   localName: string;
+  captures?: { reference: string; type: "int" | "bool"; value: string }[];
   calls: { target: string; reference: string }[];
   name: string;
   source: string;
@@ -334,6 +335,10 @@ export function compileTypeScript(
       locals,
     );
     const mutable = new Set<ts.Symbol>(locals.keys());
+    const captures = new Map<
+      string,
+      { reference: string; type: "int" | "bool"; value: string }
+    >();
     const dependencies = new Set<string>();
     const calls = new Map<string, { target: string; reference: string }>();
     const expression = (node: ts.Expression, scope: typeof locals): Expr => {
@@ -354,6 +359,31 @@ export function compileTypeScript(
           shape: bool,
           value: node.kind === ts.SyntaxKind.TrueKeyword ? "true" : "false",
         };
+      let base: ts.Expression = node;
+      while (ts.isPropertyAccessExpression(base)) base = base.expression;
+      if (
+        (ts.isIdentifier(node) || ts.isPropertyAccessExpression(node)) &&
+        ts.isIdentifier(base) &&
+        !scope.has(symbol(base))
+      ) {
+        const resolved = statics.resolve(node, value.env);
+        if (resolved.kind !== "scalar")
+          return fail(
+            node,
+            "Only scalar dependency values may be read as data",
+          );
+        const reference = node.getText();
+        captures.set(reference, {
+          reference,
+          type: resolved.type,
+          value: resolved.value,
+        });
+        return {
+          kind: "literal",
+          shape: resolved.type === "int" ? int : bool,
+          value: resolved.value,
+        };
+      }
       if (ts.isIdentifier(node)) {
         const local = scope.get(symbol(node));
         if (!local)
@@ -640,6 +670,7 @@ export function compileTypeScript(
       dependencies: [...dependencies],
       localName: functionIdentity(node),
       calls: [...calls.values()],
+      captures: [...captures.values()],
     };
     compiling.delete(value);
     compiled.set(value, result);

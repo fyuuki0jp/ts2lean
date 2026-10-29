@@ -17,6 +17,7 @@ interface FunctionSource {
   name: string;
   hash: string;
   callees: () => Record<string, Function>;
+  captures?: () => Record<string, unknown>;
   objects?: () => Record<string, object>;
 }
 interface Registry {
@@ -106,7 +107,7 @@ export function registerModule(
   registry.modules.set(module, { hash, references });
 }
 /** Read dependency paths without executing user getters. */
-export function dependencyReference(root: unknown, keys: string[]): Function {
+export function dependencyReference(root: unknown, keys: string[]): unknown {
   let value = root;
   for (const key of keys) {
     if (!value || (typeof value !== "object" && typeof value !== "function"))
@@ -124,8 +125,6 @@ export function dependencyReference(root: unknown, keys: string[]): Function {
       );
     value = d.value;
   }
-  if (typeof value !== "function")
-    throw new Failure("unsupported", "Dependency is not a function");
   return value;
 }
 
@@ -260,6 +259,18 @@ export async function verifyFunction<Input, Output>(
           "unsupported",
           `Loaded source differs from the file being verified, or a function dependency was mocked or not instrumented: ${f.source}#${f.localName}. Reload the test modules before verifying.`,
         );
+      }
+      for (const capture of f.captures ?? []) {
+        const actual = loaded.captures?.()[capture.reference];
+        const expected =
+          capture.type === "int"
+            ? BigInt(capture.value)
+            : capture.value === "true";
+        if (actual !== expected)
+          throw new Failure(
+            "unsupported",
+            `Captured setting changed: ${capture.reference}`,
+          );
       }
       const callees = loaded.callees();
       for (const call of f.calls) {

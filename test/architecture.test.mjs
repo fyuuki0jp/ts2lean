@@ -111,8 +111,8 @@ test("static wiring rejects unresolved or effectful composition", async (t) => {
       `function make(p:{readonly apply:Fn}):Fn{return x=>p.apply(x);}export const run=make({get apply(){return add;}});`,
     ],
     [
-      "scalar capture",
-      `function make(n:bigint):Fn{return x=>x+n;}export const run=make(1n);`,
+      "unsupported string capture",
+      `function make(n:string):Fn{return x=>x;}export const run=make("one");`,
     ],
     [
       "runtime factory invocation",

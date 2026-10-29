@@ -185,7 +185,7 @@ AST解析・型検査には`@ts-morph/common` **0.28.1**に同梱されたTypeSc
 
 検証対象のモジュールと読み込まれる実装モジュールには、型宣言・import/export・関数・静的な依存の組立てだけを置きます。全module scopeを検査し、選択した入口から到達する関数本体を変換します。未使用の関数本体に対する保証は主張しません。
 
-[アーキテクチャ別example](examples/architectures/README.md)では、レイヤード構成、クリーンアーキテクチャ、関数DI、局所変数を更新する実装を同じLean契約で検証します。`npm run test:architectures`で実行できます。DIの証明対象は具体的に注入した実装です。factory内は不変の依存の束縛と関数／サービスの返却に限定し、任意のDIコンテナ、decorator、クラスによるconstructor injection、実行時の依存選択、スカラー値のcaptureは未対応です。今回のDIと`let`拡張は純粋関数プロファイルが対象で、決済のeffectプロファイルにはまだ適用していません。
+[アーキテクチャ別example](examples/architectures/README.md)では、レイヤード構成、クリーンアーキテクチャ、関数DI、局所変数を更新する実装を同じLean契約で検証します。`npm run test:architectures`で実行できます。DIの証明対象は具体的に注入した実装です。factory内は不変の依存の束縛と関数／サービスの返却に限定し、任意のDIコンテナ、decorator、クラスによるconstructor injection、実行時の依存選択は未対応です。bigint・booleanのliteral、const alias、factory引数、設定オブジェクトのフィールドのcaptureに対応し、実際の値を検証前後に照合します。今回のDIと`let`拡張は純粋関数プロファイルが対象で、決済のeffectプロファイルにはまだ適用していません。
 
 ## 結果と保証の境界
 
