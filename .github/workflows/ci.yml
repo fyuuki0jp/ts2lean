@@ -19,7 +19,23 @@ jobs:
       - run: npm run test:differential
       - run: npm run verify:architectures
       - run: npm run typecheck:architectures
+      - run: npm run verify:inventory
+      - run: npm run typecheck:inventory
       - run: npm run verify:example
       - run: npm run verify:payments
       - run: npm run typecheck:payments
       - run: npm pack --dry-run
+      - name: Preserve differential replay cases
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: differential-cases
+          include-hidden-files: true
+          path: |
+            .ts2lean/differential/**/case-*.json
+            .ts2lean/differential/**/failure-*.json*
+            .ts2lean/differential/**/report.json
+            .ts2lean/differential/**/*.error.txt
+            examples/payments/.ts2lean/differential-*/case-*.json*
+            examples/payments/.ts2lean/differential-*/failure-*.json
+            examples/payments/.ts2lean/differential-*/report.json

@@ -79,3 +79,9 @@ npm test
 `test/architecture.test.mjs`は複数の特殊化と局所更新をJavaScript／Leanで比較します。`test/vitest.test.mjs`はfactory・ポートのmock、検証中の変更、namespace・名前のshadowing・入れ子Proxyを含む実参照チェックを確認します。利用例は`examples/architectures/`にあります。
 
 Vitestのディスクキャッシュには、計装処理の実装とプラグイン設定をキーとして含めます。Leanの宣言探索はimport先の仕様にも依存するため、`.lean`の変換結果はディスクキャッシュせず毎回読み直します。
+
+## union・非同期DIと独立した実行比較
+
+純粋関数の`kind`付きunionをLeanの帰納型に対応させ、タグ分岐をconstructor別のmatchへ変換します。同期factoryが返すasyncサービスはcapture環境ごとに特殊化し、既存ledger-v1の意味論へ接続します。factoryの実行自体は不変の依存の束縛と返却に限定します。
+
+JavaScriptから得た返値・タグ・payload、およびcallbackの完了・局所状態・操作順序をLean評価と比較する生成テストをCIに含めます。seedとソースを保存し、失敗をreplayできます。[差分テストの実行方法と有限な観測範囲](differential-testing.md)を参照してください。

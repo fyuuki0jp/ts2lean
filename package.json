@@ -47,8 +47,9 @@
     "verify:architectures": "vitest run --config examples/architectures/vitest.config.ts",
     "test:architectures": "npm run build && node --test test/architecture.test.mjs && npm run verify:architectures",
     "typecheck:architectures": "tsc -p examples/architectures/tsconfig.json --runExternalCode",
-    "test:differential": "npm run build && node scripts/differential.mjs",
-    "verify:inventory": "vitest run --config examples/inventory/vitest.config.ts"
+    "test:differential": "npm run build && node scripts/differential.mjs && node scripts/differential-effects.mjs",
+    "verify:inventory": "vitest run --config examples/inventory/vitest.config.ts",
+    "typecheck:inventory": "tsc -p examples/inventory/tsconfig.json --runExternalCode"
   },
   "typescript": {
     "contentMapper": {

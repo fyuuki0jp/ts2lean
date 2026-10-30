@@ -173,19 +173,21 @@ AST解析・型検査には`@ts-morph/common` **0.28.1**に同梱されたTypeSc
 
 | 対応       | 内容                                                                                                |
 | ---------- | --------------------------------------------------------------------------------------------------- |
-| 値         | `bigint`、`boolean`、固定フィールドのreadonlyレコード、ネストしたレコード                           |
+| 値         | `bigint`、`boolean`、固定フィールドのreadonlyレコード、ネストしたレコード、`kind`タグの判別可能union |
 | 関数       | 名前付き関数、arrow、function式、静的に生成したクロージャ・サービスメソッド。データ引数は必須1個 |
 | 式         | 整数リテラル、`+ - *`、大小比較、`=== !==`、`! && \|\|`、三項演算、フィールドアクセス、レコード生成 |
 | 制御       | `const`・`let`、局所代入・`+= -= *=`・単独の`++ --`、分割代入、`if/else`、ブロック、早期return |
 | モジュール | ローカル関数呼び出し、import alias、namespace import、barrel経由の再エクスポート、Leanへのtype import |
 | DI         | module scopeのcomposition、関数ポート・オブジェクトポート、factoryが返す関数やサービス、`satisfies` |
-| Lean型     | `Int`、`Bool`、型引数・継承・依存フィールドのないstructure                                          |
+| Lean型     | `Int`、`Bool`、型引数・継承・依存フィールドのないstructure、非再帰のinductive union                                          |
 
-`number`演算、除算・剰余、文字列、配列、union、optional、`any`、型アサーション、ヒープ・プロパティ更新、式内の代入、`var`、ループ、再帰、例外、`async/await`、クラス、実行中の動的クロージャ生成、外部ライブラリ呼び出しは未対応として停止します。オブジェクトの同一性比較、getter、spread、computed property、`__proto__: value`も拒否します。レコード型は各フィールドに`readonly`を明記してください。構造が同じLeanレコードは同じ型を共有してください。
+`number`演算、除算・剰余、一般の文字列、配列、非判別union、optional、`any`、型アサーション、ヒープ・プロパティ更新、式内の代入、`var`、ループ、再帰、例外、`async/await`、クラス、実行中の動的クロージャ生成、外部ライブラリ呼び出しは未対応として停止します。オブジェクトの同一性比較、getter、spread、computed property、`__proto__: value`も拒否します。レコード型は各フィールドに`readonly`を明記してください。構造が同じLeanレコードは同じ型を共有してください。
 
 検証対象のモジュールと読み込まれる実装モジュールには、型宣言・import/export・関数・静的な依存の組立てだけを置きます。全module scopeを検査し、選択した入口から到達する関数本体を変換します。未使用の関数本体に対する保証は主張しません。
 
-[アーキテクチャ別example](examples/architectures/README.md)では、レイヤード構成、クリーンアーキテクチャ、関数DI、局所変数を更新する実装を同じLean契約で検証します。`npm run test:architectures`で実行できます。DIの証明対象は具体的に注入した実装です。factory内は不変の依存の束縛と関数／サービスの返却に限定し、任意のDIコンテナ、decorator、クラスによるconstructor injection、実行時の依存選択は未対応です。bigint・booleanのliteral、const alias、factory引数、設定オブジェクトのフィールドのcaptureに対応し、実際の値を検証前後に照合します。今回のDIと`let`拡張は純粋関数プロファイルが対象で、決済のeffectプロファイルにはまだ適用していません。
+[アーキテクチャ別example](examples/architectures/README.md)では、レイヤード構成、クリーンアーキテクチャ、関数DI、局所変数を更新する実装を同じLean契約で検証します。`npm run test:architectures`で実行できます。DIの証明対象は具体的に注入した実装です。factory内は不変の依存の束縛と関数／サービスの返却に限定し、任意のDIコンテナ、decorator、クラスによるconstructor injection、実行時の依存選択は未対応です。bigint・booleanのliteral、const alias、factory引数、設定オブジェクトのフィールドのcaptureに対応し、実際の値を検証前後に照合します。決済のeffectプロファイルも、同期factoryが返すasync関数・サービスへのDB／非同期helperの注入に対応します。effect側の可変局所変数・scalar capture・async factoryは未対応です。
+
+判別可能unionは`readonly kind: "tag"`を持つrecordの和で表し、Leanの非再帰・非依存なinductiveのconstructor名をタグ、名前付き引数をpayloadに対応させます。`if`・三項演算のタグ比較で変数を絞り込みます。判別フィールド名の変更（`kind`以外）、`switch`、unionの動的キャストは未対応です。[在庫予約example](examples/inventory/README.md)では設定値DI・関数DI・成功／拒否のunionを組み合わせています。
 
 ## 結果と保証の境界
 
@@ -213,6 +215,8 @@ Vitestの`toVerify`は`verified`だけを成功として扱い、それ以外は
 ## テスト
 
 `npm test`は、Vitestでの直接importによる紐付け、mock・ラッパー・古いソースの拒否、失敗時の終了コードに加えて、整数・分岐・スコープ・関数呼び出しの意味、未対応構文の拒否、仕様の不一致、誤った実装、公理・sorryの拒否、タイムアウト、TypeScript 7.1との実接続、型更新、import除去を確認します。
+
+`npm run test:differential`は再帰的に生成した式・union・非同期DIと障害をJavaScript／Leanで比較します。seed固定、ケース保存、replay、整数入力の縮小、演算子・操作順序の意図的破壊の検出を備えます。[差分テストの範囲と実行方法](docs/differential-testing.md)を参照してください。
 
 `.ts2lean/`は生成物だけなので削除できます。CIは固定したLeanとnpm lockfileを使用します。
 

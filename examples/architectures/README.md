@@ -33,6 +33,6 @@ Vitestの紐付けでは、実際のクロージャの生成位置、現在の�
 
 ## 対応境界
 
-現在は同期・純粋な関数の静的DIです。factory内はconstによる依存の束縛と関数／サービスの返却に限定しています。一般的なclassのconstructor injection、decorator、DIコンテナ、実行時に依存を選ぶ処理、可変ヒープ状態のcapture、外部I/O、asyncなDBポートのDIは未対応です。
+このexampleは同期・純粋な関数の静的DIを扱います。factory内はconstによる依存の束縛と関数／サービスの返却に限定しています。一般的なclassのconstructor injection、decorator、DIコンテナ、実行時に依存を選ぶ処理、可変ヒープ状態のcapture、任意の外部I/Oは未対応です。非同期DBポートのDIは[決済example](../payments/README.md)を参照してください。
 
 局所変数の代入は対応しますが、オブジェクトの更新、配列、ループ、式の途中にある`x++`などは拒否します。変換器自体の形式検証ではなく、生成Leanモデルの証明とJavaScriptとの比較テストを組み合わせています。
