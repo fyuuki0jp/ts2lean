@@ -8,15 +8,23 @@ export const leanName = (name: string): string =>
 export const leanType = (shape: Shape): string =>
   shape.kind === "int"
     ? "Int"
-    : shape.kind === "string"
+    : shape.kind === "string" || shape.kind === "literal"
       ? "String"
       : shape.kind === "bool"
-      ? "Bool"
-      : leanName(shape.lean);
+        ? "Bool"
+        : leanName(shape.lean);
 export function emitExpr(expr: Expr): string {
   switch (expr.kind) {
     case "literal":
-      return expr.shape.kind === "int" ? `(${expr.value} : Int)` : expr.value;
+      return expr.shape.kind === "int"
+        ? `(${expr.value} : Int)`
+        : expr.shape.kind === "literal"
+          ? JSON.stringify(expr.value)
+          : expr.value;
+    case "variant":
+      return `(${leanName(expr.constructor)} ${expr.values.map(emitExpr).join(" ")})`;
+    case "match":
+      return `(match ${emitExpr(expr.object)} with ${expr.branches.map((b) => `| ${leanName(b.constructor)} ${b.names.join(" ")} => ${emitExpr(b.value)}`).join(" ")})`;
     case "variable":
       return expr.name;
     case "field":
@@ -47,6 +55,8 @@ export function emitExpr(expr: Expr): string {
 function emitTerm(term: Term, indent = 2): string {
   const pad = " ".repeat(indent);
   switch (term.kind) {
+    case "match":
+      return `${pad}match ${emitExpr(term.object)} with\n${term.branches.map((b) => `${pad}| ${leanName(b.constructor)} ${b.names.join(" ")} =>\n${emitTerm(b.body, indent + 2)}`).join("\n")}`;
     case "return":
       return `${pad}${emitExpr(term.value)}`;
     case "let":

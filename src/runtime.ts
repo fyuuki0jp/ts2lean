@@ -128,24 +128,43 @@ export function dependencyReference(root: unknown, keys: string[]): unknown {
   return value;
 }
 
+/** Inspect inherited data methods without invoking getters or Proxy traps. */
+function methodValue(object: object, key: string): unknown {
+  for (let p: object | null = object; p; p = Object.getPrototypeOf(p)) {
+    if (utilTypes.isProxy(p))
+      throw new Failure("unsupported", "Proxy module objects are unsupported");
+    const d = Object.getOwnPropertyDescriptor(p, key);
+    if (d) {
+      if (!("value" in d))
+        throw new Failure(
+          "unsupported",
+          `Module accessor is unsupported: ${key}`,
+        );
+      return d.value;
+    }
+  }
+}
+
 /** Instrumented module values; registration records identity, not proof of DB laws. */
 export function registerObject(
   value: unknown,
   source: { module: string; name: string; hash: string },
 ): void {
-  if (!value || typeof value !== "object") return;
+  if (!value || typeof value !== "object" || utilTypes.isProxy(value)) return;
   const methods = new Map<string, unknown>();
   for (
     let proto = value;
     proto && proto !== Object.prototype;
     proto = Object.getPrototypeOf(proto)
-  )
+  ) {
+    if (utilTypes.isProxy(proto)) return;
     for (const [name, descriptor] of Object.entries(
       Object.getOwnPropertyDescriptors(proto),
     )) {
       if (typeof descriptor.value === "function" && !methods.has(name))
         methods.set(name, descriptor.value);
     }
+  }
   registry.objects.set(value, { ...source, methods });
 }
 
@@ -315,19 +334,49 @@ export async function verifySystem(
     throw new Failure("unsupported", "Supply at least one entrypoint");
   const sources = roots.map((fn) => {
     const source = registry.functions.get(fn);
-    if (!source?.export)
+    const binding =
+      registry.bindings.get(fn) ??
+      (source?.export
+        ? { module: source.module, export: source.export }
+        : undefined);
+    if (!source || !binding)
       throw new Failure(
         "unsupported",
         "Entrypoints must be original instrumented exported functions",
       );
-    return { file: source.module, name: source.export };
+    return { file: binding.module, name: binding.export };
   });
   let checkedIR: EffectIR | undefined;
-  const check = (ir: EffectIR) => {
-    const seen = new Set<Function>();
+  const check = (
+    ir: EffectIR,
+    inspectSettings = true,
+    handles = new Map<string, object>(),
+  ): void => {
+    for (const c of ir.compositionChecks) {
+      const actual = registry.modules.get(c.source)?.references()[c.reference];
+      const origin = actual && registry.functions.get(actual);
+      if (
+        !origin ||
+        origin.module !== c.targetSource ||
+        origin.name !== c.targetName ||
+        origin.hash !== ir.sourceHashes[c.targetSource]
+      )
+        throw new Failure(
+          "unsupported",
+          `Factory dependency changed: ${c.reference}`,
+        );
+    }
+    for (const c of ir.compositionChecks)
+      for (const file of [c.source, c.targetSource])
+        if (registry.modules.get(file)?.hash !== ir.sourceHashes[file])
+          throw new Failure(
+            "unsupported",
+            `Loaded module source differs from verification input: ${file}`,
+          );
+    const seen = new Map<string, Function>();
     const visit = (fn: Function, key: string) => {
       const actual = registry.functions.get(fn),
-        expected = ir.functions.find((f) => `${f.file}#${f.name}` === key);
+        expected = ir.functions.find((f) => f.id === key);
       if (
         !actual ||
         !expected ||
@@ -339,16 +388,17 @@ export async function verifySystem(
           "unsupported",
           `Function source or dependency changed: ${key}`,
         );
-      if (seen.has(fn)) return;
-      seen.add(fn);
+      if (seen.get(key) === fn) return;
+      seen.set(key, fn);
       for (const call of expected.calls)
         visit(actual.callees()[call.reference]!, call.target);
-      for (const name of expected.objects) {
-        const object = actual.objects?.()[name],
+      for (const { reference: name, moduleId } of expected.objects) {
+        const object = actual.captures?.()[name] as object | undefined,
           loaded = object && registry.objects.get(object);
-        const law = ir.modules.find((m) => m.reference === name);
+        const law = ir.modules.find((m) => `${m.file}#${m.name}` === moduleId);
         if (
           !object ||
+          utilTypes.isProxy(object) ||
           !loaded ||
           !law ||
           loaded.module !== law.file ||
@@ -356,6 +406,13 @@ export async function verifySystem(
           loaded.hash !== law.hash
         )
           throw new Failure("unsupported", `Module identity mismatch: ${name}`);
+        const shared = handles.get(moduleId);
+        if (shared && shared !== object)
+          throw new Failure(
+            "unsupported",
+            "Expected one shared runtime database handle",
+          );
+        handles.set(moduleId, object);
         for (const api of law.metadata.interfaces.filter((i) =>
           i.methods.some((m) => m.operation === "transaction"),
         ))
@@ -366,30 +423,38 @@ export async function verifySystem(
                 `Module method is an accessor or was not registered: ${method.name}`,
               );
         for (const [method, original] of loaded.methods)
-          if ((object as Record<string, unknown>)[method] !== original)
+          if (methodValue(object, method) !== original)
             throw new Failure(
               "unsupported",
               `Module method replaced: ${name}.${method}`,
             );
-        const settings = (
-          object as { settings?: () => Record<string, unknown> }
-        ).settings?.();
-        if (!settings)
+        if (!inspectSettings) continue;
+        const settingsMethod = methodValue(object, "settings");
+        if (
+          typeof settingsMethod !== "function" ||
+          loaded.methods.get("settings") !== settingsMethod
+        )
           throw new Failure(
             "assumption-mismatch",
-            `Adapter must expose settings() evidence: ${name}`,
+            `Adapter must expose a registered settings() data method: ${name}`,
           );
-        for (const [key, value] of law.metadata.settings)
-          if (String(settings[key]) !== value)
+        const settings: unknown = Reflect.apply(settingsMethod, object, []);
+        for (const [key, value] of law.metadata.settings) {
+          const actual = dependencyReference(settings, [key]);
+          if (
+            !["string", "boolean", "number"].includes(typeof actual) ||
+            String(actual) !== value
+          )
             throw new Failure(
               "assumption-mismatch",
-              `DB setting ${key}: expected ${value}, got ${settings[key]}`,
+              `DB setting ${key}: expected ${value}`,
             );
+        }
       }
     };
-    roots.forEach((fn, i) =>
-      visit(fn, `${sources[i]!.file}#${sources[i]!.name}`),
-    );
+    roots.forEach((fn, i) => visit(fn, ir.roots[i]!));
+    // Evidence methods are user code; close their mutation window without calling them again.
+    if (inspectSettings) check(ir, false, handles);
     checkedIR = ir;
   };
   const result = await verifyEffects(sources, contract, options, check);

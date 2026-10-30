@@ -38,7 +38,15 @@ export interface StaticScalar {
   type: "int" | "bool";
   value: string;
 }
-export type StaticValue = StaticFunction | StaticObject | StaticScalar;
+export interface StaticExternal {
+  kind: "external";
+  declaration: ts.VariableDeclaration;
+}
+export type StaticValue =
+  | StaticFunction
+  | StaticObject
+  | StaticScalar
+  | StaticExternal;
 export type StaticEnv = Map<ts.Symbol, StaticValue>;
 export interface CompositionCheck {
   source: string;
@@ -51,6 +59,10 @@ export interface CompositionCheck {
 export function staticResolver(
   checker: ts.TypeChecker,
   fail: (n: ts.Node, message: string) => never,
+  options: {
+    allowAsync?: boolean;
+    external?: (declaration: ts.VariableDeclaration) => boolean;
+  } = {},
 ) {
   const cache = new Map<ts.Symbol, StaticValue>();
   const active = new Set<ts.Symbol>();
@@ -110,7 +122,7 @@ export function staticResolver(
       fn.typeParameters?.length ||
       fn.modifiers?.some(
         (m) =>
-          m.kind === ts.SyntaxKind.AsyncKeyword ||
+          (m.kind === ts.SyntaxKind.AsyncKeyword && !options.allowAsync) ||
           m.kind === ts.SyntaxKind.DeclareKeyword,
       )
     )
@@ -156,7 +168,9 @@ export function staticResolver(
       ts.isVariableDeclarationList(d.parent) &&
       d.parent.flags & ts.NodeFlags.Const
     )
-      value = resolve(d.initializer, new Map());
+      value = options.external?.(d)
+        ? { kind: "external", declaration: d }
+        : resolve(d.initializer, new Map());
     else return fail(at, "Dependencies must be immutable static bindings");
     active.delete(s);
     cache.set(s, value);
@@ -248,6 +262,8 @@ export function staticResolver(
         return fail(n, "A factory must resolve to a local function");
       const fn = callee.node;
       validateFunction(fn);
+      if (fn.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword))
+        return fail(n, "Async factories are unsupported");
       if (activeFactories.has(fn))
         return fail(n, "Recursive factory composition is unsupported");
       if (

@@ -79,14 +79,14 @@ export async function verifyEffects(
     const axioms = [
       ...new Set(audits.flatMap((l) => JSON.parse(l.slice(15)) as string[])),
     ];
-    for (const source of [...ir.functions, ...ir.modules]) {
+    for (const [file, hash] of Object.entries(ir.sourceHashes)) {
       const current = createHash("sha256")
-        .update(await readFile(source.file))
+        .update(await readFile(file))
         .digest("hex");
-      if (current !== source.hash)
+      if (current !== hash)
         throw new Failure(
           "unsupported",
-          `Source changed while proving: ${source.file}`,
+          `Source changed while proving: ${file}`,
         );
     }
     checkSources?.(ir);

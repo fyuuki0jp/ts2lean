@@ -296,3 +296,59 @@ test('configuration getter is not executed',async()=>{
     await f.cleanup();
   }
 });
+
+test("effect DI rejects different live handles and changes made by settings evidence", async () => {
+  const f = await fixture(
+    `import {adapter} from './adapter.ts';
+function make(port:{readonly db:typeof adapter}){return async()=>{await port.db.transaction(async tx=>{});};}
+export const ports={db:adapter};export const run=make(ports);`,
+    intSpec,
+  );
+  try {
+    await prepare(f);
+    for (const file of ["Database.lean", "Payment.lean"])
+      await writeFile(
+        path.join(f.dir, file),
+        await readFile(path.join(root, "examples/payments", file), "utf8"),
+      );
+    await writeFile(
+      path.join(f.dir, "vitest.config.ts"),
+      `import {defineConfig} from 'vitest/config';import {ts2lean} from 'ts2lean/vite';export default defineConfig({root:import.meta.dirname,plugins:[ts2lean()],test:{include:['binding.test.ts'],testTimeout:90000}});`,
+    );
+    await writeFile(
+      path.join(f.dir, "adapter.ts"),
+      `import type {SerializableDatabase} from './Database.lean';
+interface Adapter extends SerializableDatabase {settings():Record<string,string|number>}
+export const control={calls:0,at:0,hook:()=>{}};
+export const adapter:Adapter={transaction:async()=>{throw new Error('not executed');},listPending:async()=>[],getBalance:async()=>0n,
+settings(){control.calls++;if(control.calls===control.at)control.hook();return {journalMode:'wal',synchronous:2,readUncommitted:0,transactionMode:'IMMEDIATE'};}};`,
+    );
+    await writeFile(
+      path.join(f.dir, "binding.test.ts"),
+      `import {expect,test,vi} from 'vitest';import {verifySystem} from 'ts2lean/runtime';
+import {run,ports} from './main.ts';import {control} from './adapter.ts';import {ledgerInvariant} from './Payment.lean';
+test('settings cannot replace an already-checked handle on the final pass',async()=>{
+ const original=ports.db;control.calls=0;control.at=3;control.hook=()=>{ports.db={...original};};
+ try{await expect(verifySystem({run},ledgerInvariant)).rejects.toThrow(/Module identity mismatch/);expect(control.calls).toBe(3);}finally{ports.db=original;control.at=0;control.hook=()=>{};}
+});
+test('settings cannot substitute another registered instance between checks',async()=>{
+ vi.resetModules();const other=await import('./adapter.ts');
+ const original=ports.db;control.calls=0;control.at=3;control.hook=()=>{ports.db=other.adapter;};
+ try{await expect(verifySystem({run},ledgerInvariant)).rejects.toThrow(/one shared runtime database handle/);expect(control.calls).toBe(3);}finally{ports.db=original;control.at=0;control.hook=()=>{};}
+});
+test('settings accessors are never invoked',async()=>{
+ const d=Object.getOwnPropertyDescriptor(ports.db,'settings')!;let reads=0;
+ Object.defineProperty(ports.db,'settings',{configurable:true,get(){reads++;return d.value;}});
+ try{await expect(verifySystem({run},ledgerInvariant)).rejects.toThrow(/accessor/);expect(reads).toBe(0);}finally{Object.defineProperty(ports.db,'settings',d);}
+});
+test('same source and hash cannot collapse separately loaded handles',async()=>{
+ vi.resetModules();const other=await import('./main.ts');
+ await expect(verifySystem({first:run,second:other.run},ledgerInvariant)).rejects.toThrow(/one shared runtime database handle/);
+});`,
+    );
+    const result = await vitest(f);
+    assert.equal(result.code, 0, result.output);
+  } finally {
+    await f.cleanup();
+  }
+});

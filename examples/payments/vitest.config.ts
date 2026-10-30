@@ -11,5 +11,5 @@ process.env.PAYMENTS_DB ??= path.join(
 export default defineConfig({
   root: import.meta.dirname,
   plugins: [ts2lean()],
-  test: { include: ["payments.test.ts"], testTimeout: 90_000 },
+  test: { include: ["*.test.ts"], fileParallelism: false, testTimeout: 90_000 },
 });

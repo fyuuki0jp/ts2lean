@@ -11,7 +11,26 @@ private partial def shape (type : Expr) (seen : List Name := []) : MetaM Json :=
   let .const name _ := type | throwError "Only Int, Bool, and monomorphic structures are supported: {type}"
   if seen.contains name then throwError "Recursive structures are unsupported: {name}"
   let env ← getEnv
-  let some info := getStructureInfo? env name | throwError "Not a supported structure: {name}"
+  if (getStructureInfo? env name).isNone then
+    let some (.inductInfo ind) := env.find? name | throwError "Not a supported inductive type: {name}"
+    if ind.numParams != 0 || ind.numIndices != 0 || ind.ctors.length < 2 then
+      throwError "Unions need at least two constructors, no parameters or indices: {name}"
+    let mut variants := #[]
+    for ctorName in ind.ctors do
+      let some (.ctorInfo ctor) := env.find? ctorName | throwError "Missing constructor"
+      let fields ← forallTelescopeReducing ctor.type fun args _ => do
+        let mut fields := #[]
+        for arg in args do
+          let t ← inferType arg
+          if t.hasFVar then throwError "Dependent union fields are unsupported"
+          let decl ← getFVarLocalDecl arg
+          let field := decl.userName.toString
+          if field == "kind" then throwError "kind is reserved for the union tag"
+          fields := fields.push (Json.mkObj [("name", toJson field), ("shape", ← shape t (name :: seen))])
+        return fields
+      variants := variants.push (Json.mkObj [("tag", toJson ctorName.getString!), ("constructor", toJson ctorName.toString), ("fields", Json.arr fields)])
+    return Json.mkObj [("kind", toJson "union"), ("lean", toJson name.toString), ("tag", toJson "kind"), ("variants", Json.arr variants)]
+  let some info := getStructureInfo? env name | throwError "Missing structure: {name}"
   if !info.parentInfo.isEmpty then throwError "Structure inheritance is unsupported: {name}"
   let ctor := getStructureCtor env name
   if ctor.numParams != 0 then throwError "Generic structures are unsupported: {name}"

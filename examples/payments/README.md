@@ -123,3 +123,9 @@ effect検証は汎用TypeScript検証器ではなく、**1つの共有DBに対�
 ## 制御フローの証明強化
 
 callbackの制御構造を保持したLean実行意味論と、正常・return・throwの全経路の包含証明を追加しました。記号経路を削った変換は検証成功になりません。finallyの完了上書きや部分更新もJavaScriptと比較しています。[意味論・信頼境界・拡張方針](../../docs/semantics.md)を参照してください。
+
+## 非同期サービスへのDI
+
+`service-factory.ts`の`createPaymentService({db})`が送金・再試行・復旧のasyncメソッドを返し、`composition.ts`で実DBを注入します。非同期helperの注入も同じ仕組みです。`di.test.ts`で、同一factoryの複数instance、元の業務契約、helperのmock、DBのgetter／Proxyを検査します。
+
+注入元のconstにLean由来の名目的なDB型を必要とします。factory parameterの構造的な型だけで法則を認定しません。複数のサービスは同一の実DB handleを共有する必要があります。factoryは同期・静的な組立てに限り、返される関数はasyncにできます。証明前後にfactory・closure環境・DB・helperを照合し、`settings()`採取後にもユーザーコードを呼ばず同一性を再確認します。

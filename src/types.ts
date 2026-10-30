@@ -1,7 +1,20 @@
+export interface UnionVariant {
+  tag: string;
+  constructor: string;
+  fields: { name: string; shape: Shape }[];
+}
+export type UnionShape = {
+  kind: "union";
+  lean: string;
+  tag: "kind";
+  variants: UnionVariant[];
+};
 export type Shape =
   | { kind: "int" }
   | { kind: "bool" }
   | { kind: "string" }
+  | { kind: "literal"; value: string }
+  | UnionShape
   | { kind: "record"; lean: string; fields: { name: string; shape: Shape }[] };
 export interface Binding {
   module: string;
@@ -79,6 +92,18 @@ export class Failure extends Error {
 }
 export const defineConfig = (config: Config): Config => config;
 export function shapeKey(s: Shape): string {
+  if (s.kind === "literal") return JSON.stringify(["literal", s.value]);
+  if (s.kind === "union")
+    return JSON.stringify([
+      "union",
+      s.tag,
+      s.variants
+        .map((v) => [
+          v.tag,
+          shapeKey({ kind: "record", lean: "", fields: v.fields }),
+        ])
+        .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+    ]);
   return s.kind === "record"
     ? JSON.stringify(
         s.fields
@@ -88,6 +113,14 @@ export function shapeKey(s: Shape): string {
     : s.kind;
 }
 export function tsType(s: Shape): string {
+  if (s.kind === "literal") return JSON.stringify(s.value);
+  if (s.kind === "union")
+    return s.variants
+      .map(
+        (v) =>
+          `{ readonly kind: ${JSON.stringify(v.tag)}; ${v.fields.map((f) => `readonly ${JSON.stringify(f.name)}: ${tsType(f.shape)}`).join("; ")} }`,
+      )
+      .join(" | ");
   return s.kind === "int"
     ? "bigint"
     : s.kind === "string"

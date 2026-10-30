@@ -277,6 +277,30 @@ export class LeanWorkspace {
       line.slice(line.indexOf("TS2LEAN_CONTRACT:") + 17),
     ) as ContractInfo;
     const validate = (s: Shape): void => {
+      if (s.kind === "union") {
+        if (
+          !/^[A-Za-z_]\w*(\.[A-Za-z_]\w*)*$/.test(s.lean) ||
+          s.variants.length < 2 ||
+          new Set(s.variants.map((v) => v.tag)).size !== s.variants.length
+        )
+          throw new Failure(
+            "unsupported",
+            "Invalid Lean union name or variants",
+          );
+        for (const v of s.variants) {
+          if (
+            !/^[A-Za-z_]\w*$/.test(v.tag) ||
+            v.constructor !== `${s.lean}.${v.tag}` ||
+            v.fields.some((f) => f.name === "kind" || f.name === "__proto__") ||
+            new Set(v.fields.map((f) => f.name)).size !== v.fields.length
+          )
+            throw new Failure(
+              "unsupported",
+              "Union constructors need unique simple tags and named payload fields",
+            );
+          validate({ kind: "record", lean: s.lean, fields: v.fields });
+        }
+      }
       if (s.kind === "record") {
         if (!/^[A-Za-z_]\w*(\.[A-Za-z_]\w*)*$/.test(s.lean))
           throw new Failure(

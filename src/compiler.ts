@@ -1,7 +1,13 @@
 import { createHash } from "node:crypto";
 import { ts, getLibFiles } from "@ts-morph/common";
 import path from "node:path";
-import { Failure, shapeKey, type Shape, type ContractInfo } from "./types.js";
+import {
+  Failure,
+  shapeKey,
+  type Shape,
+  type ContractInfo,
+  type UnionShape,
+} from "./types.js";
 import {
   staticResolver,
   functionIdentity,
@@ -11,6 +17,12 @@ import {
 
 export type Expr = { shape: Shape } & (
   | { kind: "literal"; value: string }
+  | { kind: "variant"; constructor: string; values: Expr[] }
+  | {
+      kind: "match";
+      object: Expr;
+      branches: { constructor: string; names: string[]; value: Expr }[];
+    }
   | { kind: "variable"; name: string }
   | { kind: "field"; object: Expr; name: string }
   | { kind: "record"; fields: { name: string; value: Expr }[] }
@@ -20,6 +32,11 @@ export type Expr = { shape: Shape } & (
   | { kind: "conditional"; condition: Expr; yes: Expr; no: Expr }
 );
 export type Term =
+  | {
+      kind: "match";
+      object: Expr;
+      branches: { constructor: string; names: string[]; body: Term }[];
+    }
   | { kind: "return"; value: Expr }
   | { kind: "let"; name: string; value: Expr; next: Term }
   | { kind: "if"; condition: Expr; yes: Term; no: Term };
@@ -103,7 +120,19 @@ export function compileTypeScript(
   const checker = program.getTypeChecker();
   const records = new Map<string, Extract<Shape, { kind: "record" }>>();
   const generated: Extract<Shape, { kind: "record" }>[] = [];
+  const unions = new Map<string, UnionShape>();
   const register = (s: Shape): Shape => {
+    if (s.kind === "union") {
+      const old = unions.get(shapeKey(s));
+      if (old && old.lean !== s.lean)
+        throw new Failure(
+          "unsupported",
+          "Structurally identical Lean unions must share a type",
+        );
+      unions.set(shapeKey(s), s);
+      for (const v of s.variants) for (const f of v.fields) register(f.shape);
+      return s;
+    }
     if (s.kind !== "record") return s;
     for (const f of s.fields) register(f.shape);
     const key = shapeKey(s),
@@ -145,6 +174,40 @@ export function compileTypeScript(
     seen = new Set<ts.Type>(),
   ): Shape => {
     if (type.flags & ts.TypeFlags.BooleanLike) return bool;
+    if (type.isStringLiteral()) {
+      if (!/^[A-Za-z_]\w*$/.test(type.value))
+        return fail(node, "Union tags must be simple identifiers");
+      return { kind: "literal", value: type.value };
+    }
+    if (type.isUnion()) {
+      const variants = type.types.map((t) => {
+        const r = typeShape(t, node, seen);
+        if (r.kind !== "record")
+          return fail(node, "Unions require readonly record variants");
+        const tag = r.fields.find((f) => f.name === "kind")?.shape;
+        if (tag?.kind !== "literal")
+          return fail(
+            node,
+            "Each union variant needs a readonly kind string literal",
+          );
+        return {
+          tag: tag.value,
+          constructor: "",
+          fields: r.fields.filter((f) => f.name !== "kind"),
+        };
+      });
+      if (new Set(variants.map((v) => v.tag)).size !== variants.length)
+        return fail(node, "Union tags must be unique");
+      const found = unions.get(
+        shapeKey({ kind: "union", lean: "", tag: "kind", variants }),
+      );
+      if (!found)
+        return fail(
+          node,
+          "Declare this union as an inductive type in the Lean contract",
+        );
+      return found;
+    }
     if (type.flags & ts.TypeFlags.BigIntLike) return int;
     if (!(type.flags & ts.TypeFlags.Object) || type.isUnionOrIntersection())
       return fail(
@@ -341,9 +404,114 @@ export function compileTypeScript(
     >();
     const dependencies = new Set<string>();
     const calls = new Map<string, { target: string; reference: string }>();
-    const expression = (node: ts.Expression, scope: typeof locals): Expr => {
+    const coerce = (expr: Expr, target: Shape, at: ts.Node): Expr => {
+      if (shapeKey(expr.shape) === shapeKey(target)) return expr;
+      if (target.kind === "union" && expr.kind === "record") {
+        const tag = expr.fields.find((f) => f.name === "kind")?.value;
+        const tagShape = tag?.shape;
+        const variant =
+          tagShape?.kind === "literal" &&
+          target.variants.find((v) => v.tag === tagShape.value);
+        if (variant && expr.fields.length === variant.fields.length + 1) {
+          const values = variant.fields.map((f) => {
+            const field = expr.fields.find((e) => e.name === f.name);
+            if (!field) return fail(at, "Missing union payload field");
+            return coerce(field.value, f.shape, at);
+          });
+          return {
+            kind: "variant",
+            constructor: variant.constructor,
+            values,
+            shape: target,
+          };
+        }
+      }
+      same(expr.shape, target, at);
+      return expr;
+    };
+    const discriminant = (
+      n: ts.Expression,
+      scope: typeof locals,
+    ): { key: ts.Symbol; object: Expr; shape: UnionShape } | undefined => {
+      if (ts.isParenthesizedExpression(n))
+        return discriminant(n.expression, scope);
+      if (
+        ts.isPrefixUnaryExpression(n) &&
+        n.operator === ts.SyntaxKind.ExclamationToken
+      )
+        return discriminant(n.operand, scope);
+      if (
+        ts.isBinaryExpression(n) &&
+        ["&&", "||"].includes(n.operatorToken.getText())
+      )
+        return discriminant(n.left, scope) ?? discriminant(n.right, scope);
+      if (
+        ts.isBinaryExpression(n) &&
+        ["===", "!=="].includes(n.operatorToken.getText())
+      ) {
+        for (const e of [n.left, n.right])
+          if (
+            ts.isPropertyAccessExpression(e) &&
+            e.name.text === "kind" &&
+            ts.isIdentifier(e.expression)
+          ) {
+            const key = symbol(e.expression),
+              object = scope.get(key);
+            if (object?.shape.kind === "union")
+              return { key, object, shape: object.shape };
+          }
+      }
+    };
+    const narrowed = (
+      d: NonNullable<ReturnType<typeof discriminant>>,
+      scope: typeof locals,
+    ) =>
+      d.shape.variants.map((v) => {
+        const names = v.fields.map(() => `v${counter++}`);
+        const fields = [
+          {
+            name: "kind",
+            value: {
+              kind: "literal",
+              shape: { kind: "literal", value: v.tag },
+              value: v.tag,
+            } as Expr,
+          },
+          ...v.fields.map((f, i) => ({
+            name: f.name,
+            value: {
+              kind: "variable",
+              name: names[i]!,
+              shape: f.shape,
+            } as Expr,
+          })),
+        ];
+        const inner = new Map(scope);
+        inner.set(d.key, {
+          kind: "record",
+          shape: intern(
+            fields.map((f) => ({ name: f.name, shape: f.value.shape })),
+          ),
+          fields,
+        });
+        return { constructor: v.constructor, names, scope: inner };
+      });
+    const expression = (
+      node: ts.Expression,
+      scope: typeof locals,
+      expected?: Shape,
+    ): Expr => {
       if (ts.isParenthesizedExpression(node) || ts.isSatisfiesExpression(node))
-        return expression(node.expression, scope);
+        return expression(node.expression, scope, expected);
+      if (ts.isStringLiteral(node)) {
+        if (!/^[A-Za-z_]\w*$/.test(node.text))
+          return fail(node, "Union tags must be simple identifiers");
+        return {
+          kind: "literal",
+          shape: { kind: "literal", value: node.text },
+          value: node.text,
+        };
+      }
       if (ts.isBigIntLiteral(node))
         return {
           kind: "literal",
@@ -395,6 +563,10 @@ export function compileTypeScript(
       }
       if (ts.isPropertyAccessExpression(node)) {
         const object = expression(node.expression, scope);
+        if (object.kind === "record") {
+          const f = object.fields.find((f) => f.name === node.name.text);
+          if (f) return f.value;
+        }
         const field =
           object.shape.kind === "record" &&
           object.shape.fields.find((f) => f.name === node.name.text);
@@ -449,6 +621,12 @@ export function compileTypeScript(
         }
         if (node.operator === ts.SyntaxKind.ExclamationToken) {
           same(value.shape, bool, node);
+          if (value.kind === "literal")
+            return {
+              kind: "literal",
+              shape: bool,
+              value: String(value.value !== "true"),
+            };
           return { kind: "unary", operator: "!", value, shape: bool };
         }
         return fail(node, "Unsupported unary operator.");
@@ -471,12 +649,38 @@ export function compileTypeScript(
           ].includes(operator)
         )
           return fail(node, `Unsupported operator: ${operator}`);
-        const left = expression(node.left, scope),
-          right = expression(node.right, scope);
+        const left = expression(node.left, scope);
+        if (
+          ["&&", "||"].includes(operator) &&
+          left.kind === "literal" &&
+          left.shape.kind === "bool"
+        ) {
+          if (
+            (operator === "&&" && left.value === "false") ||
+            (operator === "||" && left.value === "true")
+          )
+            return left;
+          const right = expression(node.right, scope);
+          same(right.shape, bool, node);
+          return right;
+        }
+        const right = expression(node.right, scope);
+        if (
+          ["===", "!=="].includes(operator) &&
+          left.shape.kind === "literal" &&
+          right.shape.kind === "literal"
+        ) {
+          const equal = left.shape.value === right.shape.value;
+          return {
+            kind: "literal",
+            shape: bool,
+            value: String(operator === "===" ? equal : !equal),
+          };
+        }
         same(left.shape, right.shape, node);
         if (["&&", "||"].includes(operator)) same(left.shape, bool, node);
         else if (["===", "!=="].includes(operator)) {
-          if (left.shape.kind === "record")
+          if (["record", "union"].includes(left.shape.kind))
             return fail(node, "Object identity comparisons are unsupported.");
         } else same(left.shape, int, node);
         return {
@@ -488,12 +692,41 @@ export function compileTypeScript(
         };
       }
       if (ts.isConditionalExpression(node)) {
-        const condition = expression(node.condition, scope),
-          yes = expression(node.whenTrue, scope),
-          no = expression(node.whenFalse, scope);
+        const d = discriminant(node.condition, scope);
+        if (d) {
+          const branches = narrowed(d, scope).map((b) => ({
+            ...b,
+            value: expression(node, b.scope, expected),
+          }));
+          const target = expected ?? branches[0]!.value.shape;
+          return {
+            kind: "match",
+            object: d.object,
+            shape: target,
+            branches: branches.map((b) => ({
+              ...b,
+              value: coerce(b.value, target, node),
+            })),
+          };
+        }
+        const condition = expression(node.condition, scope);
         same(condition.shape, bool, node.condition);
-        same(yes.shape, no.shape, node);
-        return { kind: "conditional", condition, yes, no, shape: yes.shape };
+        if (condition.kind === "literal")
+          return expression(
+            condition.value === "true" ? node.whenTrue : node.whenFalse,
+            scope,
+            expected,
+          );
+        let yes = expression(node.whenTrue, scope, expected),
+          no = expression(node.whenFalse, scope, expected);
+        const target =
+          expected ??
+          (shapeKey(yes.shape) === shapeKey(no.shape)
+            ? yes.shape
+            : typeShape(checker.getTypeAtLocation(node), node));
+        yes = coerce(yes, target, node);
+        no = coerce(no, target, node);
+        return { kind: "conditional", condition, yes, no, shape: target };
       }
       if (ts.isCallExpression(node)) {
         if (
@@ -506,7 +739,11 @@ export function compileTypeScript(
         if (resolved.kind !== "function")
           return fail(node, "Call target must resolve to a function");
         const callee = compileFunction(resolved);
-        const argument = expression(node.arguments[0]!, scope);
+        const argument = coerce(
+          expression(node.arguments[0]!, scope, callee.input),
+          callee.input,
+          node,
+        );
         same(argument.shape, callee.input, node);
         dependencies.add(callee.name);
         const reference = node.expression.getText();
@@ -538,7 +775,11 @@ export function compileTypeScript(
         if (!st.expression) return fail(st, "Return a value.");
         if (rest.length)
           return fail(rest[0]!, "Unreachable statements are unsupported.");
-        const value = expression(st.expression, scope);
+        const value = coerce(
+          expression(st.expression, scope, fn.output),
+          fn.output,
+          st,
+        );
         same(value.shape, fn.output, st);
         return { kind: "return", value };
       }
@@ -549,13 +790,11 @@ export function compileTypeScript(
         const bindings = st.declarationList.declarations.map((d) => {
           if (!d.initializer)
             return fail(d, "Only initialized const bindings are supported.");
-          const value = expression(d.initializer, inner);
-          if (d.type)
-            same(
-              typeShape(checker.getTypeFromTypeNode(d.type), d.type),
-              value.shape,
-              d,
-            );
+          const declared = d.type
+            ? typeShape(checker.getTypeFromTypeNode(d.type), d.type)
+            : undefined;
+          let value = expression(d.initializer, inner, declared);
+          if (declared) value = coerce(value, declared, d);
           const name = `v${counter++}`;
           bindData(
             d.name,
@@ -633,6 +872,16 @@ export function compileTypeScript(
         };
       }
       if (ts.isIfStatement(st)) {
+        const d = discriminant(st.expression, scope);
+        if (d)
+          return {
+            kind: "match",
+            object: d.object,
+            branches: narrowed(d, scope).map((b) => ({
+              ...b,
+              body: sequence(statements, b.scope, continuation),
+            })),
+          };
         const condition = expression(st.expression, scope);
         same(condition.shape, bool, st.expression);
         const branch = (s: ts.Statement | undefined): Term =>
@@ -640,6 +889,10 @@ export function compileTypeScript(
             s ? (ts.isBlock(s) ? s.statements : [s]) : [],
             new Map(scope),
             next,
+          );
+        if (condition.kind === "literal")
+          return branch(
+            condition.value === "true" ? st.thenStatement : st.elseStatement,
           );
         return {
           kind: "if",
@@ -657,7 +910,11 @@ export function compileTypeScript(
         )
       : {
           kind: "return" as const,
-          value: expression(fn.node.body as ts.Expression, locals),
+          value: coerce(
+            expression(fn.node.body as ts.Expression, locals, fn.output),
+            fn.output,
+            node,
+          ),
         };
     if (body.kind === "return") same(body.value.shape, fn.output, node);
     const result: FunctionIR = {

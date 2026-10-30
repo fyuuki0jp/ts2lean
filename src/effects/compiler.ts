@@ -3,6 +3,13 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { Failure, type ContractInfo, type ModuleMetadata } from "../types.js";
 import { contractTypes } from "../verify.js";
+import {
+  staticResolver,
+  functionIdentity,
+  type StaticFunction,
+  type StaticEnv,
+  type CompositionCheck,
+} from "../static.js";
 import { lowerCallback, type StatementIR } from "./structured.js";
 
 export type ValueType =
@@ -36,6 +43,7 @@ export interface PathState {
   control?: "return" | "throw";
   writes: string[];
   trace: string[];
+  events: string[];
   contextualOptions?: boolean;
 }
 export interface TxPath {
@@ -45,6 +53,7 @@ export interface TxPath {
   result: Value;
   writes: string[];
   trace: string[];
+  events: string[];
 }
 export interface TxCompletion extends TxPath {
   control: "normal" | "return" | "throw";
@@ -60,12 +69,13 @@ export interface TransactionSite {
   program: StatementIR[];
 }
 export interface EffectFunction {
+  id: string;
   file: string;
   name: string;
   export: string;
   hash: string;
   calls: { reference: string; target: string }[];
-  objects: string[];
+  objects: { reference: string; moduleId: string }[];
 }
 export interface ModuleBinding {
   reference: string;
@@ -77,6 +87,9 @@ export interface ModuleBinding {
   metadata: ModuleMetadata;
 }
 export interface EffectIR {
+  roots: string[];
+  compositionChecks: CompositionCheck[];
+  sourceHashes: Record<string, string>;
   functions: EffectFunction[];
   modules: ModuleBinding[];
   transactions: TransactionSite[];
@@ -123,6 +136,7 @@ const clone = (p: PathState): PathState => ({
   env: new Map(p.env),
   writes: [...p.writes],
   trace: [...p.trace],
+  events: [...p.events],
 });
 
 export function compileEffects(
@@ -186,6 +200,9 @@ export function compileEffects(
       }),
     );
   const ir: EffectIR = {
+    roots: [],
+    compositionChecks: [],
+    sourceHashes: {},
     functions: [],
     modules: [],
     transactions: [],
@@ -249,14 +266,32 @@ export function compileEffects(
     }
     return found;
   };
-  const moduleFor = (id: ts.Identifier): ModuleBinding => {
-    const s = symbol(id),
-      d = s.valueDeclaration;
-    if (!d || !ts.isVariableDeclaration(d))
+  const declarationLaw = (d: ts.VariableDeclaration) => {
+    let type = d.type;
+    if (d.initializer && ts.isSatisfiesExpression(unwrap(d.initializer)))
+      type = (unwrap(d.initializer) as ts.SatisfiesExpression).type;
+    return type &&
+      (ts.isTypeReferenceNode(type) || ts.isIntersectionTypeNode(type))
+      ? lawTypes(type)
+      : [];
+  };
+  const statics = staticResolver(checker, fail, {
+    allowAsync: true,
+    external: (d) => declarationLaw(d).length > 0,
+  });
+  const moduleFor = (
+    receiver: ts.Expression,
+    env: StaticEnv,
+  ): ModuleBinding => {
+    const resolved = statics.resolve(receiver, env);
+    if (resolved.kind !== "external")
       return fail(
-        id,
+        receiver,
         "DB module must have an explicit Lean-derived module type",
       );
+    const d = resolved.declaration,
+      s = symbol(d.name),
+      id = receiver;
     let type = d.type;
     if (d.initializer && ts.isSatisfiesExpression(unwrap(d.initializer)))
       type = (unwrap(d.initializer) as ts.SatisfiesExpression).type;
@@ -279,7 +314,7 @@ export function compileEffects(
       return fail(id, "Unsupported module semantics profile");
     const file = d.getSourceFile().fileName;
     const binding: ModuleBinding = {
-      reference: id.text,
+      reference: receiver.getText(),
       file,
       name: s.name,
       hash: createHash("sha256").update(d.getSourceFile().text).digest("hex"),
@@ -290,7 +325,9 @@ export function compileEffects(
     if (
       !ir.modules.some(
         (m) =>
-          m.file === file && m.name === binding.name && m.reference === id.text,
+          m.file === file &&
+          m.name === binding.name &&
+          m.reference === receiver.getText(),
       )
     )
       ir.modules.push(binding);
@@ -572,44 +609,41 @@ export function compileEffects(
     q.conditions.push(want ? truth(v) : `¬ (${truth(v)})`);
     return q;
   };
-  const analyzed = new Set<ts.Symbol>(),
-    active = new Set<ts.Symbol>();
-  const functionFor = (
-    s: ts.Symbol,
-    n: ts.Node,
-  ): ts.FunctionDeclaration | ts.ArrowFunction => {
-    const d = s.valueDeclaration;
-    if (d && ts.isFunctionDeclaration(d) && d.body) return d;
-    if (
-      d &&
-      ts.isVariableDeclaration(d) &&
-      d.initializer &&
-      ts.isArrowFunction(unwrap(d.initializer))
-    )
-      return unwrap(d.initializer) as ts.ArrowFunction;
-    return fail(
-      n,
-      "Only statically resolved function declarations and arrow functions are supported",
-    );
+  const analyzed = new Map<StaticFunction, EffectFunction>(),
+    active = new Set<StaticFunction>();
+  const asFunction = (
+    value: ReturnType<typeof statics.resolve>,
+    at: ts.Node,
+  ): StaticFunction => {
+    if (value.kind !== "function")
+      return fail(at, "Expected a static async function dependency");
+    return value;
   };
-  const analyze = (s: ts.Symbol, at: ts.Node): void => {
-    if (active.has(s))
+  const analyze = (
+    specialization: StaticFunction,
+    at: ts.Node,
+  ): EffectFunction => {
+    if (active.has(specialization))
       return fail(at, "Recursive effect functions are unsupported");
-    if (analyzed.has(s)) return;
-    active.add(s);
-    const fn = functionFor(s, at),
+    const prior = analyzed.get(specialization);
+    if (prior) return prior;
+    active.add(specialization);
+    const fn = specialization.node,
       file = fn.getSourceFile().fileName;
+    statics.validateFunction(fn);
     if (!fn.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword))
       return fail(fn, "Effect functions must be async");
     const meta: EffectFunction = {
+      id: `effect${ir.functions.length}`,
       file,
-      name: s.name,
-      export: s.name,
+      name: functionIdentity(fn),
+      export: functionIdentity(fn),
       hash: createHash("sha256").update(fn.getSourceFile().text).digest("hex"),
       calls: [],
       objects: [],
     };
     ir.functions.push(meta);
+    analyzed.set(specialization, meta);
     const captures: Parameter[] = [],
       env = new Map<ts.Symbol, Value>();
     for (const param of fn.parameters) {
@@ -669,6 +703,7 @@ export function compileEffects(
       env,
       writes: [],
       trace: [],
+      events: [],
     };
     const methods = (
       binding: ModuleBinding,
@@ -683,14 +718,10 @@ export function compileEffects(
       call: ts.CallExpression,
       tx?: { symbol: ts.Symbol; binding: ModuleBinding },
     ) => {
-      if (
-        !ts.isPropertyAccessExpression(call.expression) ||
-        !ts.isIdentifier(call.expression.expression)
-      )
-        return undefined;
+      if (!ts.isPropertyAccessExpression(call.expression)) return undefined;
       const receiver = call.expression.expression,
         methodName = call.expression.name.text;
-      if (tx && symbol(receiver) === tx.symbol) {
+      if (tx && ts.isIdentifier(receiver) && symbol(receiver) === tx.symbol) {
         const method = methods(tx.binding, "Transaction").find(
           (m) => m.name === methodName,
         );
@@ -701,13 +732,17 @@ export function compileEffects(
           inside: true,
         };
       }
-      const binding = moduleFor(receiver),
+      const resolved = statics.resolve(receiver, specialization.env);
+      if (resolved.kind !== "external") return undefined;
+      const binding = moduleFor(receiver, specialization.env),
         method = methods(binding, "database").find(
           (m) => m.name === methodName,
         );
       if (!method) return fail(call, "Unknown module operation");
-      if (!meta.objects.includes(receiver.text))
-        meta.objects.push(receiver.text);
+      const reference = receiver.getText(),
+        moduleId = `${binding.file}#${binding.name}`;
+      if (!meta.objects.some((o) => o.reference === reference))
+        meta.objects.push({ reference, moduleId });
       return { operation: method.operation, binding, inside: false };
     };
     const evalEffect = (
@@ -736,18 +771,19 @@ export function compileEffects(
       };
 
       if (!info) {
-        if (!ts.isIdentifier(n.expression))
-          return fail(n, "Dynamic calls are unsupported");
         if (tx)
           return fail(
             n,
             "Helpers in callbacks must be inlined by the compiler (not yet supported)",
           );
-        const callee = symbol(n.expression);
-        analyze(callee, n);
+        const callee = asFunction(
+          statics.resolve(n.expression, specialization.env),
+          n,
+        );
+        const target = analyze(callee, n);
         meta.calls.push({
-          reference: n.expression.text,
-          target: `${callee.valueDeclaration!.getSourceFile().fileName}#${callee.name}`,
+          reference: n.expression.getText(),
+          target: target.id,
         });
         for (const arg of n.arguments) {
           const v = value(arg, p);
@@ -764,7 +800,7 @@ export function compileEffects(
             });
           }
         }
-        const sig = checker.getSignatureFromDeclaration(functionFor(callee, n));
+        const sig = checker.getSignatureFromDeclaration(callee.node);
         const ret =
           sig && checker.getAwaitedType(checker.getReturnTypeOfSignature(sig));
         return [
@@ -816,6 +852,7 @@ export function compileEffects(
           variables: [],
           writes: [],
           trace: [],
+          events: [],
         };
         // Caller-owned records can change during await. Only local snapshots may be captured.
         for (const [key, v] of start.env) if (v.unsafe) start.env.delete(key);
@@ -857,6 +894,7 @@ export function compileEffects(
             result: out.result ?? { type: "void", lean: "()" },
             writes: out.writes,
             trace: out.trace,
+            events: out.events,
           };
           site.completions.push(completion);
           if (out.control !== "throw") site.paths.push(completion);
@@ -917,20 +955,32 @@ export function compileEffects(
       if (!info.inside)
         return fail(n, "A callback cannot call methods on the outer DB handle");
       const args = n.arguments.map((a) => value(a, p));
+      const eventArgument = (v: Value): string =>
+        v.type === "request"
+          ? `(Lean.toJson [${field(v.lean, "operationId")},${field(v.lean, "from")},${field(v.lean, "to")},toString (${field(v.lean, "amount")})]).compress`
+          : v.type === "int"
+            ? `toString (${v.lean})`
+            : v.lean;
+      const event = (outcome: string) =>
+        `Lean.Json.arr #[Lean.toJson ${quote(op)}, Lean.toJson ${quote(outcome)}, Lean.toJson ([${args.map(eventArgument).join(",")}] : List String)]`;
       const q = clone(p);
+      q.events.push(event("ok"));
       q.trace.push(`${op}(${n.arguments.map((a) => a.getText()).join(", ")})`);
       let v: Value = { type: "void", lean: "()" };
       if (op === "request.get")
-        v = { type: "option", lean: `(${q.state}).requests ${args[0]!.lean}` };
+        v = {
+          type: "option",
+          lean: `(${q.state}).requests (${args[0]!.lean})`,
+        };
       else if (op === "ledger.get")
         v = {
           type: "option",
-          lean: `lookup (${q.state}).ledger ${args[0]!.lean}`,
+          lean: `lookup (${q.state}).ledger (${args[0]!.lean})`,
         };
       else if (op === "balance.get")
-        v = { type: "int", lean: `(${q.state}).balances ${args[0]!.lean}` };
+        v = { type: "int", lean: `(${q.state}).balances (${args[0]!.lean})` };
       else if (op === "balance.set") {
-        q.state = `setBalance (${q.state}) ${args[0]!.lean} ${args[1]!.lean}`;
+        q.state = `setBalance (${q.state}) (${args[0]!.lean}) (${args[1]!.lean})`;
         q.writes.push(op);
       } else if (op === "request.insert") {
         if (p.retryOriginal)
@@ -947,24 +997,25 @@ export function compileEffects(
         q.conditions.push(
           `(${q.state}).requests ${field(args[0]!.lean, "operationId")} = none`,
         );
-        q.state = `insertRequest (${q.state}) ${args[0]!.lean}`;
+        q.state = `insertRequest (${q.state}) (${args[0]!.lean})`;
         q.writes.push(op);
       } else if (op === "ledger.insert") {
         q.conditions.push(
           `lookup (${q.state}).ledger ${field(args[0]!.lean, "operationId")} = none`,
         );
-        q.state = `insertTransfer (${q.state}) ${args[0]!.lean}`;
+        q.state = `insertTransfer (${q.state}) (${args[0]!.lean})`;
         q.writes.push(op);
       } else return fail(n, "Unknown primitive semantics");
       // A caught failure may leave earlier local writes, and a write may fail after applying.
       const failedBefore = rejected(p);
+      failedBefore.events.push(event("throw"));
       const results = [
         { p: q, value: v },
         { p: failedBefore, value: { type: "void" as const, lean: "()" } },
       ];
       if (q.state !== p.state)
         results.push({
-          p: rejected(q),
+          p: { ...rejected(q), events: [...p.events, event("throw")] },
           value: { type: "void", lean: "()" },
         });
       return results;
@@ -1155,18 +1206,22 @@ export function compileEffects(
                 .line + 1,
           });
       }
-    active.delete(s);
-    analyzed.add(s);
+    active.delete(specialization);
+    return meta;
   };
   for (const entry of entries) {
     const sf = program.getSourceFile(path.resolve(entry.file));
     if (!sf) return fail(program.getSourceFiles()[0]!, "Missing entrypoint");
     const ms = checker.getSymbolAtLocation(sf);
+    const [exportName, ...members] = entry.name.split(".");
     const s =
-      ms && checker.getExportsOfModule(ms).find((s) => s.name === entry.name);
+      ms && checker.getExportsOfModule(ms).find((s) => s.name === exportName);
     if (!s) return fail(sf, `Missing export ${entry.name}`);
+    let target = statics.resolveSymbol(s, sf, new Map());
+    for (const member of members) target = statics.member(target, member, sf);
+    const specialization = asFunction(target, sf);
     if (operation) {
-      const fn = functionFor(s, sf);
+      const fn = specialization.node;
       const sig = checker.getSignatureFromDeclaration(fn);
       const ret =
         sig && checker.getAwaitedType(checker.getReturnTypeOfSignature(sig));
@@ -1180,12 +1235,27 @@ export function compileEffects(
           "Operation contracts require one request parameter and a promised receipt result",
         );
     }
-    analyze(s, s.valueDeclaration ?? sf);
+    ir.roots.push(analyze(specialization, sf).id);
   }
   if (new Set(ir.modules.map((m) => m.file + "#" + m.name)).size > 1)
     throw new Failure(
       "unsupported",
       "This effects profile supports one shared database handle",
     );
+  ir.compositionChecks = statics.checks;
+  ir.sourceHashes = Object.fromEntries(
+    program
+      .getSourceFiles()
+      .filter(
+        (sf) =>
+          !sf.isDeclarationFile &&
+          !virtual.has(path.resolve(sf.fileName)) &&
+          !sf.fileName.includes(`${path.sep}node_modules${path.sep}`),
+      )
+      .map((sf) => [
+        sf.fileName,
+        createHash("sha256").update(sf.text).digest("hex"),
+      ]),
+  );
   return ir;
 }
