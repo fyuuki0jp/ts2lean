@@ -59,20 +59,20 @@ npm test
 
 ## 現在の対応範囲と次の拡張
 
-0.1.1時点の純粋関数と外部操作の対応範囲は次のとおりです。未対応のコードを近似して証明済みにはしません。
+0.1.2時点の純粋関数と外部操作の対応範囲は次のとおりです。未対応のコードを近似して証明済みにはしません。
 
 | 用途 | 現在の境界 |
 | --- | --- |
 | 整数counter・小数timeline | `Int`に対応する`bigint`のみ。JavaScriptの`number`は未対応 |
 | ID・hash比較 | 一般の`string`入力・返値は未対応。unionの文字列タグや台帳プロファイル内の文字列とは区別する |
 | nullable・optional | 一般の純粋関数の`T \| null`、`T \| undefined`、optional propertyは未対応。台帳のnullable要求は専用モデル |
-| discriminant | required readonly recordの`kind`文字列タグに対応。`{ok:true,value}\|{ok:false,error}`は未対応 |
+| discriminant | required readonly recordの`kind`文字列タグと明示登録したbooleanタグに対応。具体的な`Result<T,E>`と短絡ROPを検証できる |
 | reducer | boolean分岐、対応型の局所更新、`kind` unionに対応。`switch`、record spread、配列操作は未対応 |
 | DBポート | `ledger-v1`の操作と明示した外部法則のみ。D1の任意CAS・lease・checkpointは未対応 |
 
-導入先のJSON・DB・UIとの互換性を保つため、次の段階で拡張します。以下は実装計画であり、0.1.1の機能ではありません。
+導入先のJSON・DB・UIとの互換性を保つため、次の段階で拡張します。以下は今後の実装計画です。booleanタグと限定的なgeneric helperの具体化は0.1.2で対応しています。
 
-1. **文字列・欠損値・booleanタグ**：ID/hashの等値比較をUTF-16 code unit列で定義します。プロパティなし、存在する`undefined`、`null`、値を区別します。unionのタグ名・タグ値を明示するmetadataを追加し、`ok: true/false`の判定と構築へ接続します。constructor名からbooleanタグを推測しません。
+1. **文字列・欠損値**：ID/hashの等値比較をUTF-16 code unit列で定義します。プロパティなし、存在する`undefined`、`null`、値を区別します。booleanタグは`#ts2lean_bool_union`で明示し、constructor名から推測しません。
 2. **IEEE754のnumber**：公開TypeScript型を`number`のまま保ち、binary64の丸め、NaN、±Infinity、±0、subnormal、strict equalityをモデル化します。安全な整数counterには範囲条件下で整数算術へ接続する証明補題を使い、小数timelineには丸めを保った順序・範囲・誤差の契約を使います。`Int`やLeanの`Float`へ単に置換して対応済みとはしません。
 3. **readonly配列とreducer**：通常のdense arrayと純粋callbackから始め、membership/filter/map、slice、範囲外アクセス、undo/redoを扱います。`includes`のSameValueZeroと`===`を区別し、`readonly`型だけをdense arrayの証拠にしません。record spreadはown data propertyのshallow copyと後勝ち上書きを保持します。`switch`はliteral discriminant・fallthroughなしから対応し、未対応fallthroughは拒否します。
 4. **任意の明示的ポート契約**：操作の引数・結果・成功/拒否後の状態をLeanの遷移関係で定義し、既存のCompletion意味論へ接続します。CASの不可分性、leaseのowner/token/時刻、checkpointの再送条件は個別の外部法則として示します。操作列全体を暗黙にtransaction化せず、D1自体を証明したとは主張しません。
@@ -118,3 +118,13 @@ Vitestのディスクキャッシュには、計装処理の実装とプラグ�
 純粋関数の`kind`付きunionをLeanの帰納型に対応させ、タグ分岐をconstructor別のmatchへ変換します。同期factoryが返すasyncサービスはcapture環境ごとに特殊化し、既存ledger-v1の意味論へ接続します。factoryの実行自体は不変の依存の束縛と返却に限定します。
 
 JavaScriptから得た返値・タグ・payload、およびcallbackの完了・局所状態・操作順序をLean評価と比較する生成テストをCIに含めます。seedとソースを保存し、失敗をreplayできます。[差分テストの実行方法と有限な観測範囲](differential-testing.md)を参照してください。
+
+## boolean Resultとgeneric helper
+
+0.1.2から、`#ts2lean_bool_union Outcome "ok" Outcome.ok Outcome.err`でLeanの2-constructor帰納型と実際のbooleanタグの対応を宣言できます。タグとpayloadの衝突、constructorの重複、不正な所属、相反する登録は拒否します。Content Mapperは同じboolean literalとreadonly payloadを出力します。登録型は契約の入力・出力に直接現れない中間Resultにも使えます。
+
+呼び出しごとに具体的な型引数と実関数インスタンスをキーにしてhelperを変換します。明示型引数と、`value:T`のような直接の型変数引数からの推論に対応します。複合型だけからの推論、genericな検証ルート、再帰、高階callback、generatorは拒否します。必須payloadが`never`のvariantは除外し、残りが1つならreadonly recordとして扱います。未解決の型変数を`any`へ置換しません。
+
+booleanタグの分岐はLeanのconstructor別のmatchへ変換します。`if (!step.ok) return step;`の失敗分岐には後続処理を接続しません。異なる具体Resultへの失敗返却は、タグとpayloadの互換性を検査して対応するconstructorへ再構築します。これは値の保持であり、JavaScriptオブジェクトのidentityの証明ではありません。
+
+[最小例](../examples/result/README.md)はboolean成功値・kind union成功値・kind unionエラー・成功payloadの次段への受け渡しを含みます。`test/result.test.mjs`の変異テスト、JavaScript／Lean比較、Vitestの実関数検証、Content Mapper型検査、配布tarballでの実行を確認します。一般文字列・Errorクラス・任意の外部副作用はこの対応に含めません。

@@ -213,7 +213,17 @@ export function ts2lean(
         ): Map<string, string> => {
           const out = new Map<string, string>();
           const visit = (n: ts.Node): void => {
-            if (isFunctionNode(n)) return;
+            if (isFunctionNode(n) || ts.isTypeNode(n)) return;
+            // Property names are not variable reads. In particular, visiting the
+            // name of steps.return produced the invalid getter `return return`.
+            if (ts.isIdentifier(n)) {
+              const parent = n.parent;
+              if ((ts.isPropertyAccessExpression(parent) && parent.name === n) ||
+                  (ts.isPropertyAssignment(parent) && parent.name === n) ||
+                  (ts.isBindingElement(parent) && parent.propertyName === n) ||
+                  ((ts.isLabeledStatement(parent) || ts.isBreakStatement(parent) ||
+                    ts.isContinueStatement(parent)) && parent.label === n)) return;
+            }
             if (
               ts.isCallExpression(n) ||
               (data && (ts.isIdentifier(n) || ts.isPropertyAccessExpression(n)))

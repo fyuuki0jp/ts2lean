@@ -8,6 +8,10 @@ export const leanName = (name: string): string =>
 export const leanType = (shape: Shape): string =>
   shape.kind === "int"
     ? "Int"
+    : shape.kind === "never"
+      ? "Empty"
+    : shape.kind === "literal" && typeof shape.value === "boolean"
+      ? "Bool"
     : shape.kind === "string" || shape.kind === "literal"
       ? "String"
       : shape.kind === "bool"
@@ -18,7 +22,7 @@ export function emitExpr(expr: Expr): string {
     case "literal":
       return expr.shape.kind === "int"
         ? `(${expr.value} : Int)`
-        : expr.shape.kind === "literal"
+        : expr.shape.kind === "literal" && typeof expr.shape.value === "string"
           ? JSON.stringify(expr.value)
           : expr.value;
     case "variant":

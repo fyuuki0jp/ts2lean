@@ -196,11 +196,17 @@ AST解析・型検査にはTypeScript **7.1.0-beta**のnative API（`typescript/
 
 状態を持つ処理の制御フローは、[共通のcompletion意味論と包含証明](docs/semantics.md)でも検査します。try/catch/finally・再送出・awaitの失敗を保持し、変換した経路の欠落をLeanで検出します。
 
+## Resultによる純粋関数の合成
+
+`Result<T, E> = {readonly ok:true; readonly value:T} | {readonly ok:false; readonly error:E}`を本番の型のまま検証できます。`ok`／`err`のgeneric helperを具体化し、`if (!step.ok) return step;`で最初の失敗を保持するROPに対応します。成功値・エラー値には既存の`kind` unionをネストできます。
+
+Leanでは具体型ごとに帰納型を定義し、`#ts2lean_bool_union Validation "ok" Validation.ok Validation.err`でTSの表現を明示します。[実行できる最小例と型の対応](examples/result/README.md)を参照してください。`npm run verify:result`で実関数を証明し、`npm run typecheck:result`でContent Mapperの型互換性を確認できます。高階callbackの`map`／`andThen`とgeneratorによる`sequence`は未対応です。
+
 ## 純粋関数の対応範囲
 
 | 対応       | 内容                                                                                                |
 | ---------- | --------------------------------------------------------------------------------------------------- |
-| 値         | `bigint`、`boolean`、固定フィールドのreadonlyレコード、ネストしたレコード、`kind`タグの判別可能union |
+| 値         | `bigint`、`boolean`、固定フィールドのreadonlyレコード、ネストしたレコード、`kind`文字列タグ・明示登録したbooleanタグの判別可能union |
 | 関数       | 名前付き関数、arrow、function式、クロージャ・サービスメソッド。データ引数は必須1個以上（複数時は単純な引数名が必要） |
 | 式         | 整数リテラル、`+ - *`、大小比較、`=== !==`、`! && \|\|`、三項演算、フィールドアクセス、レコード生成 |
 | 制御       | `const`・`let`、局所代入・`+= -= *=`・単独の`++ --`、分割代入、`if/else`、ブロック、早期return |
@@ -214,7 +220,7 @@ AST解析・型検査にはTypeScript **7.1.0-beta**のnative API（`typescript/
 
 [アーキテクチャ別example](examples/architectures/README.md)では、レイヤード構成、クリーンアーキテクチャ、関数DI、局所変数を更新する実装を同じLean契約で検証します。`npm run test:architectures`で実行できます。DIの証明対象は具体的に注入した実装です。`toVerify`は生成済みの関数を検証するため、factory自体の実行方法に依存しません。CLIの静的compositionではfactory内を不変の依存の束縛と関数／サービスの返却に限定します。decorator・クラスによるconstructor injectionは未対応です。bigint・booleanのliteral、const alias、factory引数、設定オブジェクトのフィールドのcaptureに対応し、実際の値を検証前後に照合します。決済のeffectプロファイルも、同期factoryが返すasync関数・サービスへのDB／非同期helperの注入に対応します。effect側の可変局所変数・scalar captureは未対応です。
 
-判別可能unionは`readonly kind: "tag"`を持つrecordの和で表し、Leanの非再帰・非依存なinductiveのconstructor名をタグ、名前付き引数をpayloadに対応させます。`if`・三項演算のタグ比較で変数を絞り込みます。判別フィールド名の変更（`kind`以外）、`switch`、unionの動的キャストは未対応です。[在庫予約example](examples/inventory/README.md)では設定値DI・関数DI・成功／拒否のunionを組み合わせています。
+判別可能unionは`readonly kind: "tag"`を持つrecordの和で表し、Leanの非再帰・非依存なinductiveのconstructor名をタグ、名前付き引数をpayloadに対応させます。`if`・三項演算のタグ比較で変数を絞り込みます。booleanタグは`#ts2lean_bool_union`で判別フィールドとconstructorの対応を明示できます。文字列タグのフィールド名変更、`switch`、unionの動的キャストは未対応です。[在庫予約example](examples/inventory/README.md)では設定値DI・関数DI・成功／拒否のunionを組み合わせています。
 
 ## 結果と保証の境界
 

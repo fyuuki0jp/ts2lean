@@ -66,6 +66,7 @@ export function staticResolver(
   fail: (n: ts.Node, message: string) => never,
   options: {
     allowAsync?: boolean;
+    allowGenerics?: boolean;
     external?: (declaration: ts.VariableDeclaration) => boolean;
   } = {},
 ) {
@@ -125,7 +126,7 @@ export function staticResolver(
     if (
       !fn.body ||
       fn.asteriskToken ||
-      fn.typeParameters?.length ||
+      (fn.typeParameters?.length && !options.allowGenerics) ||
       fn.modifiers?.some(
         (m) =>
           (m.kind === ts.SyntaxKind.AsyncKeyword && !options.allowAsync) ||

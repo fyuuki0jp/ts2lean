@@ -123,6 +123,7 @@ function lowerTypeScript(
   const records = new Map<string, Extract<Shape, { kind: "record" }>>();
   const generated: Extract<Shape, { kind: "record" }>[] = [];
   const unions = new Map<string, UnionShape>();
+  let typeBindings = new Map<Type, Shape>();
   const register = (s: Shape): Shape => {
     if (s.kind === "union") {
       const old = unions.get(shapeKey(s));
@@ -149,6 +150,7 @@ function lowerTypeScript(
   };
   register(contract.input);
   register(contract.output);
+  for (const shape of contract.supportingTypes ?? []) register(shape);
   const fail = (node: ts.Node, message: string): never => {
     const sf = node.getSourceFile(),
       pos = sf.getLineAndCharacterOfPosition(node.getStart());
@@ -175,6 +177,14 @@ function lowerTypeScript(
     node: ts.Node,
     seen = new Set<Type>(),
   ): Shape => {
+    if (type.flags & TypeFlags.TypeParameter) {
+      const binding = typeBindings.get(type);
+      if (!binding) return fail(node, "Generic type parameters must be concretized at a verified call");
+      return binding;
+    }
+    if (type.flags & TypeFlags.Never) return {kind:"never"};
+    if (type.isBooleanLiteralType())
+      return {kind:"literal", value:type.value};
     if (type.flags & TypeFlags.BooleanLike) return bool;
     if (type.isStringLiteralType()) {
       if (!/^[A-Za-z_]\w*$/.test(type.value))
@@ -182,33 +192,27 @@ function lowerTypeScript(
       return { kind: "literal", value: type.value };
     }
     if (type.isUnionType()) {
-      const variants = type.getTypes().map((t) => {
+      const members = type.getTypes().map((t) => {
         const r = typeShape(t, node, seen);
+        if (r.kind === "never") return undefined;
         if (r.kind !== "record")
           return fail(node, "Unions require readonly record variants");
-        const tag = r.fields.find((f) => f.name === "kind")?.shape;
-        if (tag?.kind !== "literal")
-          return fail(
-            node,
-            "Each union variant needs a readonly kind string literal",
-          );
-        return {
-          tag: tag.value,
-          constructor: "",
-          fields: r.fields.filter((f) => f.name !== "kind"),
-        };
+        return r;
+      }).filter((r): r is Extract<Shape, {kind:"record"}> => !!r);
+      if (!members.length) return {kind:"never"};
+      if (members.length === 1) return members[0]!;
+      const matches = [...unions.values()].filter((candidate) => {
+        const variants = members.map(r => {
+          const tag = r.fields.find(f => f.name === candidate.tag)?.shape;
+          return tag?.kind === "literal" ? {tag:tag.value, constructor:"",
+            fields:r.fields.filter(f => f.name !== candidate.tag)} : undefined;
+        });
+        return variants.every(v => v !== undefined) &&
+          shapeKey({kind:"union",lean:"",tag:candidate.tag,variants:variants as UnionShape["variants"]}) === shapeKey(candidate);
       });
-      if (new Set(variants.map((v) => v.tag)).size !== variants.length)
-        return fail(node, "Union tags must be unique");
-      const found = unions.get(
-        shapeKey({ kind: "union", lean: "", tag: "kind", variants }),
-      );
-      if (!found)
-        return fail(
-          node,
-          "Declare this union as an inductive type in the Lean contract",
-        );
-      return found;
+      if (matches.length !== 1)
+        return fail(node, "Declare an unambiguous matching union and discriminant in the Lean contract");
+      return matches[0]!;
     }
     if (type.flags & TypeFlags.BigIntLike) return int;
     if (
@@ -230,8 +234,7 @@ function lowerTypeScript(
     const next = new Set(seen).add(type);
     const props = checker.getPropertiesOfType(type);
     if (!props.length) return fail(node, "Empty records are unsupported.");
-    return intern(
-      props.map((p) => {
+    const fields = props.map((p) => {
         const decls = p.declarations.map((d) => d.resolve()!);
         if (
           p.flags & SymbolFlags.Optional ||
@@ -258,10 +261,13 @@ function lowerTypeScript(
             next,
           ),
         };
-      }),
-    );
+      });
+    // A required never payload makes a variant uninhabited (e.g. Result<T, never>).
+    return fields.some(f => f.shape.kind === "never") ? {kind:"never"} : intern(fields);
   };
+  const booleanShape = (s: Shape) => s.kind === "bool" || (s.kind === "literal" && typeof s.value === "boolean");
   const same = (a: Shape, b: Shape, node: ts.Node): void => {
+    if (booleanShape(a) && booleanShape(b)) return;
     if (shapeKey(a) !== shapeKey(b))
       fail(node, "Expression and declared contract types differ.");
   };
@@ -271,7 +277,7 @@ function lowerTypeScript(
     if (s.flags & SymbolFlags.Alias) s = checker.getAliasedSymbol(s);
     return s;
   };
-  const statics = staticResolver(checker, fail);
+  const statics = staticResolver(checker, fail, {allowGenerics:true});
   const sourceFiles = program
     .getSourceFileNames()
     .map((file) => program.getSourceFile(file)!)
@@ -299,10 +305,8 @@ function lowerTypeScript(
         ts.isExportDeclaration(st)
       )
         continue;
-      if (ts.isFunctionDeclaration(st) && st.name && st.body) {
-        statics.validateFunction(st);
-        continue;
-      }
+      // Declarations have no module initialization effect. Validate only called bodies.
+      if (ts.isFunctionDeclaration(st) && st.name) continue;
       if (
         ts.isVariableStatement(st) &&
         st.declarationList.flags & ts.NodeFlags.Const
@@ -339,16 +343,21 @@ function lowerTypeScript(
     fail(sf, "Select an exported function or service method");
   }
   const functions: FunctionIR[] = [];
-  const compiled = new Map<StaticFunction, FunctionIR>();
+  const compiled = new Map<StaticFunction, Map<string, FunctionIR>>();
   const compiling = new Set<StaticFunction>();
   let functionSerial = 0;
-  const compileFunction = (value: StaticFunction): FunctionIR => {
-    const previous = compiled.get(value);
+  const compileFunction = (value: StaticFunction, arguments_: Shape[] = []): FunctionIR => {
+    const specialization = JSON.stringify(arguments_.map(shapeKey));
+    const previous = compiled.get(value)?.get(specialization);
     if (previous) return previous;
-    const previousProgram = program, previousChecker = checker;
+    const previousProgram = program, previousChecker = checker, previousBindings = typeBindings;
     if (runtime) ({ program, checker } = runtime.context(value));
     try {
     const node = value.node;
+    if ((node.typeParameters?.length ?? 0) !== arguments_.length)
+      return fail(node, "Generic functions require concrete type arguments at a verified call");
+    typeBindings = new Map((node.typeParameters ?? []).map((p, i) =>
+      [checker.getTypeAtLocation(p), arguments_[i]!]));
     if (compiling.has(value))
       return fail(node, "Recursive calls are unsupported");
     compiling.add(value);
@@ -372,6 +381,8 @@ function lowerTypeScript(
       input: parameterFields ? intern(parameterFields) : typeShape(checker.getTypeAtLocation(parameter), parameter),
       output: typeShape(checker.getReturnTypeOfSignature(signature), node),
     };
+    if (fn.input.kind === "never" || fn.output.kind === "never")
+      return fail(node, "Uninhabited function signatures are unsupported");
     let counter = 1;
     const locals = new Map<CompilerSymbol, Expr>();
     const bindData = (
@@ -428,25 +439,34 @@ function lowerTypeScript(
     const calls = new Map<string, { target: string; reference: string }>();
     const coerce = (expr: Expr, target: Shape, at: ts.Node): Expr => {
       if (shapeKey(expr.shape) === shapeKey(target)) return expr;
-      if (target.kind === "union" && expr.kind === "record") {
-        const tag = expr.fields.find((f) => f.name === "kind")?.value;
-        const tagShape = tag?.shape;
-        const variant =
-          tagShape?.kind === "literal" &&
-          target.variants.find((v) => v.tag === tagShape.value);
-        if (variant && expr.fields.length === variant.fields.length + 1) {
-          const values = variant.fields.map((f) => {
-            const field = expr.fields.find((e) => e.name === f.name);
+      if (target.kind === "bool" && booleanShape(expr.shape)) return {...expr, shape:target};
+      if (target.kind === "literal")
+        return fail(at, "Literal payload must retain the exact declared value");
+      const projectField = (name: string, shape: Shape): Expr =>
+        expr.kind === "record" ? expr.fields.find(f => f.name === name)!.value :
+          shape.kind === "literal" ? {kind:"literal", value:String(shape.value), shape} :
+          {kind:"field", object:expr, name, shape};
+      if (target.kind === "union" && expr.shape.kind === "record") {
+        const fields = expr.shape.fields;
+        const tag = fields.find(f => f.name === target.tag)?.shape;
+        const variant = tag?.kind === "literal" && target.variants.find(v => v.tag === tag.value);
+        if (variant && fields.length === variant.fields.length + 1) {
+          const values = variant.fields.map(f => {
+            const field = fields.find(e => e.name === f.name);
             if (!field) return fail(at, "Missing union payload field");
-            return coerce(field.value, f.shape, at);
+            return coerce(projectField(field.name, field.shape), f.shape, at);
           });
-          return {
-            kind: "variant",
-            constructor: variant.constructor,
-            values,
-            shape: target,
-          };
+          return {kind:"variant", constructor:variant.constructor, values, shape:target};
         }
+      }
+      if (target.kind === "record" && expr.shape.kind === "record" &&
+          target.fields.length === expr.shape.fields.length) {
+        const source = expr.shape;
+        return {kind:"record", shape:target, fields:target.fields.map(f => {
+          const field = source.fields.find(e => e.name === f.name);
+          if (!field) return fail(at, "Missing record payload field");
+          return {name:f.name, value:coerce(projectField(field.name, field.shape), f.shape, at)};
+        })};
       }
       same(expr.shape, target, at);
       return expr;
@@ -467,22 +487,13 @@ function lowerTypeScript(
         ["&&", "||"].includes(n.operatorToken.getText())
       )
         return discriminant(n.left, scope) ?? discriminant(n.right, scope);
-      if (
-        ts.isBinaryExpression(n) &&
-        ["===", "!=="].includes(n.operatorToken.getText())
-      ) {
-        for (const e of [n.left, n.right])
-          if (
-            ts.isPropertyAccessExpression(e) &&
-            e.name.text === "kind" &&
-            ts.isIdentifier(e.expression)
-          ) {
-            const key = symbol(e.expression),
-              object = scope.get(key);
-            if (object?.shape.kind === "union")
-              return { key, object, shape: object.shape };
-          }
+      if (ts.isPropertyAccessExpression(n) && ts.isIdentifier(n.expression)) {
+        const key = symbol(n.expression), object = scope.get(key);
+        if (object?.shape.kind === "union" && object.shape.tag === n.name.text)
+          return {key, object, shape:object.shape};
       }
+      if (ts.isBinaryExpression(n) && ["===", "!=="].includes(n.operatorToken.getText()))
+        return discriminant(n.left, scope) ?? discriminant(n.right, scope);
     };
     const narrowed = (
       d: NonNullable<ReturnType<typeof discriminant>>,
@@ -492,11 +503,11 @@ function lowerTypeScript(
         const names = v.fields.map(() => `v${counter++}`);
         const fields = [
           {
-            name: "kind",
+            name: d.shape.tag,
             value: {
               kind: "literal",
               shape: { kind: "literal", value: v.tag },
-              value: v.tag,
+              value: String(v.tag),
             } as Expr,
           },
           ...v.fields.map((f, i) => ({
@@ -546,7 +557,7 @@ function lowerTypeScript(
       )
         return {
           kind: "literal",
-          shape: bool,
+          shape: {kind:"literal", value:node.kind === ts.SyntaxKind.TrueKeyword},
           value: node.kind === ts.SyntaxKind.TrueKeyword ? "true" : "false",
         };
       let base: ts.Expression = node;
@@ -593,6 +604,8 @@ function lowerTypeScript(
           object.shape.kind === "record" &&
           object.shape.fields.find((f) => f.name === node.name.text);
         if (!field) return fail(node, "Unknown record field.");
+        if (field.shape.kind === "literal")
+          return {kind:"literal", value:String(field.shape.value), shape:field.shape};
         return { kind: "field", object, name: field.name, shape: field.shape };
       }
       if (ts.isObjectLiteralExpression(node)) {
@@ -679,7 +692,7 @@ function lowerTypeScript(
         if (
           ["&&", "||"].includes(operator) &&
           left.kind === "literal" &&
-          left.shape.kind === "bool"
+          booleanShape(left.shape)
         ) {
           if (
             (operator === "&&" && left.value === "false") ||
@@ -756,14 +769,29 @@ function lowerTypeScript(
       }
       if (ts.isCallExpression(node)) {
         if (
-          node.typeArguments?.length ||
           node.arguments.some(ts.isSpreadElement)
         )
-          return fail(node, "Verified calls require explicit data arguments without generics or spread");
+          return fail(node, "Verified calls require explicit data arguments without spread");
         const resolved = runtime ? runtime.resolve(value, node.expression) : statics.resolve(node.expression, value.env);
         if (resolved.kind !== "function")
           return fail(node, "Call target must resolve to a function");
-        const callee = compileFunction(resolved);
+        const signature = checker.getResolvedSignature(node);
+        if (!signature) return fail(node, "Unresolved call signature");
+        const typeArguments = (resolved.node.typeParameters ?? []).map((parameter, i) => {
+          const explicit = node.typeArguments?.[i];
+          if (explicit) return typeShape(checker.getTypeFromTypeNode(explicit), explicit);
+          // The native signature API exposes instantiated value parameters, not
+          // a generic mapper. Infer only a direct T parameter, never by ordinal.
+          const position = resolved.node.parameters.findIndex(p =>
+            p.type && ts.isTypeReferenceNode(p.type) && ts.isIdentifier(p.type.typeName) &&
+            p.type.typeName.text === parameter.name.text && !p.type.typeArguments?.length);
+          if (position < 0) return fail(node,
+            "Generic helpers need explicit type arguments or a direct type-parameter input");
+          return typeShape(checker.getParameterType(signature, position), node);
+        });
+        const returnShape = typeShape(checker.getReturnTypeOfSignature(signature), node);
+        const callee = compileFunction(resolved, typeArguments);
+        same(callee.output, returnShape, node);
         if (node.arguments.length !== resolved.node.parameters.length)
           return fail(node, "Verified call argument count must match the declaration");
         const argument: Expr = callee.parameterNames ? {
@@ -966,10 +994,12 @@ function lowerTypeScript(
       captures: [...captures.values()],
     };
     compiling.delete(value);
-    compiled.set(value, result);
+    const specializations = compiled.get(value) ?? new Map<string, FunctionIR>();
+    specializations.set(specialization, result);
+    compiled.set(value, specializations);
     functions.push(result);
     return result;
-    } finally { program = previousProgram; checker = previousChecker; }
+    } finally { program = previousProgram; checker = previousChecker; typeBindings = previousBindings; }
   };
   const target = compileFunction(targetValue as StaticFunction);
   if (

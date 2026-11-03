@@ -15,6 +15,11 @@ private partial def shape (type : Expr) (seen : List Name := []) : MetaM Json :=
     let some (.inductInfo ind) := env.find? name | throwError "Not a supported inductive type: {name}"
     if ind.numParams != 0 || ind.numIndices != 0 || ind.ctors.length < 2 then
       throwError "Unions need at least two constructors, no parameters or indices: {name}"
+    let mappings := (boolUnionMappings.getState env).filter (fun entry => entry.1 == name)
+    let mapping := mappings[0]?.map Prod.snd
+    if mappings.any (fun entry => some entry.2 != mapping) then
+      throwError "Conflicting boolean union mappings: {name}"
+    let tagField := mapping.map (·.field) |>.getD "kind"
     let mut variants := #[]
     for ctorName in ind.ctors do
       let some (.ctorInfo ctor) := env.find? ctorName | throwError "Missing constructor"
@@ -25,11 +30,14 @@ private partial def shape (type : Expr) (seen : List Name := []) : MetaM Json :=
           if t.hasFVar then throwError "Dependent union fields are unsupported"
           let decl ← getFVarLocalDecl arg
           let field := decl.userName.toString
-          if field == "kind" then throwError "kind is reserved for the union tag"
+          if field == tagField then throwError "{tagField} is reserved for the union tag"
           fields := fields.push (Json.mkObj [("name", toJson field), ("shape", ← shape t (name :: seen))])
         return fields
-      variants := variants.push (Json.mkObj [("tag", toJson ctorName.getString!), ("constructor", toJson ctorName.toString), ("fields", Json.arr fields)])
-    return Json.mkObj [("kind", toJson "union"), ("lean", toJson name.toString), ("tag", toJson "kind"), ("variants", Json.arr variants)]
+      let tag := match mapping with
+        | some m => toJson (ctorName == m.trueConstructor)
+        | none => toJson ctorName.getString!
+      variants := variants.push (Json.mkObj [("tag", tag), ("constructor", toJson ctorName.toString), ("fields", Json.arr fields)])
+    return Json.mkObj [("kind", toJson "union"), ("lean", toJson name.toString), ("tag", toJson tagField), ("variants", Json.arr variants)]
   let some info := getStructureInfo? env name | throwError "Missing structure: {name}"
   if !info.parentInfo.isEmpty then throwError "Structure inheritance is unsupported: {name}"
   let ctor := getStructureCtor env name
@@ -61,7 +69,8 @@ elab "#ts2lean_contract " id:ident : command => liftTermElabM do
   let t ← whnf (← inferType e)
   if !t.isAppOfArity ``Contract 2 then throwError "Expected Ts2Lean.Contract, got {t}"
   let args := t.getAppArgs
-  let json := Json.mkObj [("name", toJson id.getId.toString), ("unfold", toJson ((← userDefinitions e.constName!).map Name.toString)), ("input", ← shape args[0]!), ("output", ← shape args[1]!)]
+  let supportingTypes ← (boolUnionMappings.getState (← getEnv)).mapM fun entry => shape (mkConst entry.1)
+  let json := Json.mkObj [("supportingTypes", Json.arr supportingTypes), ("name", toJson id.getId.toString), ("unfold", toJson ((← userDefinitions e.constName!).map Name.toString)), ("input", ← shape args[0]!), ("output", ← shape args[1]!)]
   logInfo m!"TS2LEAN_CONTRACT:{json.compress}"
 
 /-- Find contracts declared in the imported source module, using Lean's environment. -/

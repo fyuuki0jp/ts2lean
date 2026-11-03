@@ -1,6 +1,6 @@
 {
   "name": "@fyuuki0jp/ts2lean",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Verify TypeScript functions and transactional ledger services against Lean 4 contracts",
   "type": "module",
   "bin": {
@@ -57,7 +57,9 @@
     "dev:payments": "node scripts/payments-demo.mjs",
     "build:payments-ui": "vite build --config examples/payments/ui/vite.config.ts",
     "verify:payments-ui": "vitest run --config examples/payments/ui/vitest.config.ts",
-    "typecheck:payments-ui": "node scripts/link-self.mjs && tsc -p examples/payments/ui/tsconfig.json --runExternalCode"
+    "typecheck:payments-ui": "node scripts/link-self.mjs && tsc -p examples/payments/ui/tsconfig.json --runExternalCode",
+    "verify:result": "vitest run --config examples/result/vitest.config.ts",
+    "typecheck:result": "tsc -p examples/result/tsconfig.json --runExternalCode"
   },
   "typescript": {
     "contentMapper": {

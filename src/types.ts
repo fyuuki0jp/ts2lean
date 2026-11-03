@@ -1,19 +1,20 @@
 export interface UnionVariant {
-  tag: string;
+  tag: string | boolean;
   constructor: string;
   fields: { name: string; shape: Shape }[];
 }
 export type UnionShape = {
   kind: "union";
   lean: string;
-  tag: "kind";
+  tag: string;
   variants: UnionVariant[];
 };
 export type Shape =
   | { kind: "int" }
   | { kind: "bool" }
   | { kind: "string" }
-  | { kind: "literal"; value: string }
+  | { kind: "never" }
+  | { kind: "literal"; value: string | boolean }
   | UnionShape
   | { kind: "record"; lean: string; fields: { name: string; shape: Shape }[] };
 export interface Binding {
@@ -46,6 +47,8 @@ export interface ContractInfo {
   input: Shape;
   output: Shape;
   unfold: string[];
+  /** Explicitly mapped intermediate boolean unions from the Lean environment. */
+  supportingTypes?: Shape[];
 }
 export type Status =
   | "verified"
@@ -113,12 +116,13 @@ export function shapeKey(s: Shape): string {
     : s.kind;
 }
 export function tsType(s: Shape): string {
+  if (s.kind === "never") return "never";
   if (s.kind === "literal") return JSON.stringify(s.value);
   if (s.kind === "union")
     return s.variants
       .map(
         (v) =>
-          `{ readonly kind: ${JSON.stringify(v.tag)}; ${v.fields.map((f) => `readonly ${JSON.stringify(f.name)}: ${tsType(f.shape)}`).join("; ")} }`,
+          `{ readonly ${JSON.stringify(s.tag)}: ${JSON.stringify(v.tag)}; ${v.fields.map((f) => `readonly ${JSON.stringify(f.name)}: ${tsType(f.shape)}`).join("; ")} }`,
       )
       .join(" | ");
   return s.kind === "int"

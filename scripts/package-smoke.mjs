@@ -134,8 +134,13 @@ export default defineConfig({plugins:[ts2lean()],test:{testTimeout:90000}});
 `);
   await writeFile(path.join(dir, "tsconfig.json"), JSON.stringify({
     compilerOptions: {strict:true,target:"ES2022",module:"ESNext",moduleResolution:"bundler",noEmit:true,types:["node"],skipLibCheck:true},
-    contentMappers:[{package:"@fyuuki0jp/ts2lean",extensions:[".lean"]}], include:["*.ts"],
+    contentMappers:[{package:"@fyuuki0jp/ts2lean",extensions:[".lean"]}], include:["*.ts", "result-example/*.ts"],
   }));
+  const resultDir = path.join(dir, "result-example");
+  await mkdir(resultDir);
+  for (const file of ["Result.lean", "main.ts", "result.ts", "result.test.ts"]) {
+    await writeFile(path.join(resultDir, file), await readFile(path.join(root, "examples/result", file)));
+  }
   const localElan = path.join(root, ".tools/elan");
   const env = {...process.env};
   if (!env.TS2LEAN_LEAN && existsSync(path.join(localElan,"bin/lean"))) {

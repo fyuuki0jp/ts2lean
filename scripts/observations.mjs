@@ -21,7 +21,7 @@ export function encodeInput(shape, value) {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw Error("Invalid record");
   if (shape.kind === "union") {
-    const v = shape.variants.find((v) => v.tag === value.kind);
+    const v = shape.variants.find((v) => v.tag === value[shape.tag]);
     if (!v) throw Error("Invalid tag");
     if (Object.keys(value).length !== v.fields.length + 1)
       throw Error("Unexpected union fields");
@@ -40,7 +40,7 @@ export function leanObservation(shape, expr, depth = 0) {
     return `(match ${expr} with ${shape.variants
       .map((v) => {
         const names = v.fields.map((_, i) => `o${depth}_${i}`);
-        return `| ${leanName(v.constructor)} ${names.join(" ")} => Lean.Json.mkObj [("kind",Lean.toJson ${JSON.stringify(v.tag)})${v.fields.map((f, i) => `,(${JSON.stringify(f.name)},${leanObservation(f.shape, names[i], depth + 1)})`).join("")}]`;
+        return `| ${leanName(v.constructor)} ${names.join(" ")} => Lean.Json.mkObj [(${JSON.stringify(shape.tag)},Lean.toJson ${JSON.stringify(v.tag)})${v.fields.map((f, i) => `,(${JSON.stringify(f.name)},${leanObservation(f.shape, names[i], depth + 1)})`).join("")}]`;
       })
       .join(" ")})`;
   if (shape.kind === "record")
@@ -70,7 +70,7 @@ export function shrinkInputs(shape, input) {
     shape.kind === "record"
       ? shape.fields
       : shape.kind === "union"
-        ? shape.variants.find((v) => v.tag === input.kind).fields
+        ? shape.variants.find((v) => v.tag === input[shape.tag]).fields
         : [];
   return fields.flatMap((f) =>
     shrinkInputs(f.shape, input[f.name]).map((value) => ({

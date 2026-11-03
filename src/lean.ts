@@ -312,6 +312,7 @@ export class LeanWorkspace {
       if (s.kind === "union") {
         if (
           !/^[A-Za-z_]\w*(\.[A-Za-z_]\w*)*$/.test(s.lean) ||
+          !/^[A-Za-z_]\w*$/.test(s.tag) || s.tag === "__proto__" ||
           s.variants.length < 2 ||
           new Set(s.variants.map((v) => v.tag)).size !== s.variants.length
         )
@@ -321,9 +322,10 @@ export class LeanWorkspace {
           );
         for (const v of s.variants) {
           if (
-            !/^[A-Za-z_]\w*$/.test(v.tag) ||
-            v.constructor !== `${s.lean}.${v.tag}` ||
-            v.fields.some((f) => f.name === "kind" || f.name === "__proto__") ||
+            (typeof v.tag !== "boolean" && (typeof v.tag !== "string" || !/^[A-Za-z_]\w*$/.test(v.tag))) ||
+            !v.constructor.startsWith(`${s.lean}.`) ||
+            !/^[A-Za-z_]\w*$/.test(v.constructor.slice(s.lean.length + 1)) ||
+            v.fields.some((f) => f.name === s.tag || f.name === "__proto__") ||
             new Set(v.fields.map((f) => f.name)).size !== v.fields.length
           )
             throw new Failure(
@@ -332,6 +334,9 @@ export class LeanWorkspace {
             );
           validate({ kind: "record", lean: s.lean, fields: v.fields });
         }
+        if (new Set(s.variants.map(v => v.constructor)).size !== s.variants.length ||
+            new Set(s.variants.map(v => typeof v.tag)).size !== 1)
+          throw new Failure("unsupported", "Union constructors and literal tag types must be unambiguous");
       }
       if (s.kind === "record") {
         if (!/^[A-Za-z_]\w*(\.[A-Za-z_]\w*)*$/.test(s.lean))
@@ -351,6 +356,7 @@ export class LeanWorkspace {
     };
     validate(info.input);
     validate(info.output);
+    for (const shape of info.supportingTypes ?? []) validate(shape);
     return info;
   }
 }
