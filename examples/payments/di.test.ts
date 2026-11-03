@@ -10,8 +10,10 @@ import {
   recoveryPort,
 } from "./composition.ts";
 
-test("async factory services specialize the same source for each captured environment", async () => {
+test("an async factory service verifies its captured environment", async () => {
   await expect(payments.transfer).toVerify(transferContract);
+});
+test("async factory services specialize the same source for each captured environment", async () => {
   const result = await verifySystem(
     {
       first: payments.transfer,
