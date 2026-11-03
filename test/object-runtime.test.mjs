@@ -52,12 +52,16 @@ import {expect,test} from 'vitest';import '@fyuuki0jp/ts2lean/vitest';
 import {make,named,pair,plus,minus,reassigned,service,ports,use} from './main.ts';
 import {contract,two,pairContract,decrement,eleven,mixed} from './Spec.lean';
 import {readFile,writeFile,unlink} from 'node:fs/promises';
-test('unexported closures and named local functions use their own captured values',async()=>{
+test('unexported closures use their own captured values',async()=>{
  const one=make(1n),second=make(2n);
  await expect(one).toVerify(contract);
  await expect(second).toVerify(two);
  await expect(expect(second).toVerify(contract)).rejects.toMatchObject({result:{status:'unproved'}});
- await expect(pair(one,second)).toVerify(pairContract);
+});
+test('composed closures retain separate captured values',async()=>{
+ await expect(pair(make(1n),make(2n))).toVerify(pairContract);
+});
+test('named local functions and methods retain their actual bodies',async()=>{
  await expect(named(1n)).toVerify(contract);
  await expect(service.apply).toVerify(contract);
 });
@@ -91,8 +95,9 @@ test('old and new versions of the same source coexist in one dependency graph',a
 `);
     const result = await run(process.execPath,
       [path.join(root, "node_modules/vitest/vitest.mjs"), "run", "--config", path.join(f.dir, "vitest.config.ts")],
-      root, process.env, 360000);
+      // The whole child suite contains 14 proofs; its budget must cover all tests.
+      root, process.env, 900000);
     assert.equal(result.code, 0, result.output);
-    assert.match(result.output, /4 passed/);
+    assert.match(result.output, /6 passed/);
   } finally { await f.cleanup(); }
 });

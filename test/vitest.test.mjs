@@ -21,7 +21,7 @@ async function prepare(f) {
   `,
   );
 }
-async function vitest(f) {
+async function vitest(f, timeout = 300000) {
   return run(
     process.execPath,
     [
@@ -32,7 +32,7 @@ async function vitest(f) {
     ],
     root,
     process.env,
-    300000,
+    timeout,
   );
 }
 
@@ -378,7 +378,8 @@ test('same source snapshot cannot collapse separately loaded handles',async()=>{
  await expect(verifySystem({first:run,second:other.run},ledgerInvariant)).rejects.toThrow(/Verification environment changed|one shared database handle/);
 });`,
     );
-    const result = await vitest(f);
+    // Eight independently bounded tests can collectively exceed five minutes on CI.
+    const result = await vitest(f, 900000);
     assert.equal(result.code, 0, result.output);
   } finally {
     await f.cleanup();
