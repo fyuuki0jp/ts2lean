@@ -57,16 +57,49 @@ npm test
 
 外側の関数は、到達するトランザクションの探索と、任意の順序・キャプチャ値への安全側の抽象化を維持しています。finally内のトランザクションも探索しますが、service全体のPromiseスケジューラやマイクロタスク列をLeanで実行するモデルではありません。DBの基本操作の失敗モデルも外部契約による安全側の範囲であり、SQLiteの全内部挙動との双方向の等価性を主張しません。
 
-## 拡張する順序
+## 現在の対応範囲と次の拡張
 
-1. 式内の副作用と評価順序：副作用を含む三項演算、短絡評価、複合代入、複数引数の評価順序を共通IRへ下げる。
-2. effect側の局所変数とループ：純粋関数で対応したlet・代入をeffectの環境へ広げ、break/continue、label、ループ不変条件、IteratorCloseを扱う。
-3. ヒープ：参照identity、alias、配列、object、property descriptor、getter/setter、prototype、classを扱う。
-4. JavaScriptの値：IEEE 754のnumber、NaN、符号付きゼロ、UTF-16文字列、型変換・truthinessを扱う。現在のIntやUnicode文字列へ近似して済ませない。
-5. 呼出しと非同期処理：closure、this、動的dispatch、Promise状態、thenable、マイクロタスク、並行コンビネータを扱う。
-6. 標準組込み・ホストAPI：操作意味論と法則、実装への対応証拠を分離する。
+0.1.1時点の純粋関数と外部操作の対応範囲は次のとおりです。未対応のコードを近似して証明済みにはしません。
 
-各拡張では、構造的意味論、変換、証明ルール、実行比較、意図的に壊した変換の拒否を揃えて対応を宣言します。現段階でこれら全体が対応済みという意味ではありません。
+| 用途 | 現在の境界 |
+| --- | --- |
+| 整数counter・小数timeline | `Int`に対応する`bigint`のみ。JavaScriptの`number`は未対応 |
+| ID・hash比較 | 一般の`string`入力・返値は未対応。unionの文字列タグや台帳プロファイル内の文字列とは区別する |
+| nullable・optional | 一般の純粋関数の`T \| null`、`T \| undefined`、optional propertyは未対応。台帳のnullable要求は専用モデル |
+| discriminant | required readonly recordの`kind`文字列タグに対応。`{ok:true,value}\|{ok:false,error}`は未対応 |
+| reducer | boolean分岐、対応型の局所更新、`kind` unionに対応。`switch`、record spread、配列操作は未対応 |
+| DBポート | `ledger-v1`の操作と明示した外部法則のみ。D1の任意CAS・lease・checkpointは未対応 |
+
+導入先のJSON・DB・UIとの互換性を保つため、次の段階で拡張します。以下は実装計画であり、0.1.1の機能ではありません。
+
+1. **文字列・欠損値・booleanタグ**：ID/hashの等値比較をUTF-16 code unit列で定義します。プロパティなし、存在する`undefined`、`null`、値を区別します。unionのタグ名・タグ値を明示するmetadataを追加し、`ok: true/false`の判定と構築へ接続します。constructor名からbooleanタグを推測しません。
+2. **IEEE754のnumber**：公開TypeScript型を`number`のまま保ち、binary64の丸め、NaN、±Infinity、±0、subnormal、strict equalityをモデル化します。安全な整数counterには範囲条件下で整数算術へ接続する証明補題を使い、小数timelineには丸めを保った順序・範囲・誤差の契約を使います。`Int`やLeanの`Float`へ単に置換して対応済みとはしません。
+3. **readonly配列とreducer**：通常のdense arrayと純粋callbackから始め、membership/filter/map、slice、範囲外アクセス、undo/redoを扱います。`includes`のSameValueZeroと`===`を区別し、`readonly`型だけをdense arrayの証拠にしません。record spreadはown data propertyのshallow copyと後勝ち上書きを保持します。`switch`はliteral discriminant・fallthroughなしから対応し、未対応fallthroughは拒否します。
+4. **任意の明示的ポート契約**：操作の引数・結果・成功/拒否後の状態をLeanの遷移関係で定義し、既存のCompletion意味論へ接続します。CASの不可分性、leaseのowner/token/時刻、checkpointの再送条件は個別の外部法則として示します。操作列全体を暗黙にtransaction化せず、D1自体を証明したとは主張しません。
+
+各段階でLeanの値モデル、型宣言、変換、証明ルール、独立したJavaScript/Lean実行比較、意図的な誤変換の拒否を揃えます。Numberでは`2^53`周辺、`0.1 + 0.2`、丸め・overflow・underflow・NaN・±0、文字列では孤立surrogate、欠損値ではproperty presence、配列では順序・空配列・入力非変更を検査します。検証用codecはbit表現やタグを使えますが、アプリのJSON表現は変更しません。未証明は`unproved`、未対応は`unsupported`のまま返します。
+
+一般ヒープのidentity/alias、getter/Proxy、任意ループ、effect内の局所更新、Promise/thenableのスケジューラは別の拡張です。UI・DB・ホストAPIとの境界は、上記機能を加えた後も明示します。
+
+## 所有モジュール内のLean契約
+
+0.1.1から、`src/features/edit-routine/model/Access.lean`のようにハイフンを含むディレクトリ・ファイル名を使えます。ViteとContent Mapperをリポジトリrootで一つ設定し、TypeScriptから通常の相対importで読み込みます。
+
+```ts
+import { canEdit } from "./src/features/edit-routine/model/Access.lean";
+```
+
+Leanファイル同士のimportでは、ハイフンを含む要素を引用識別子にします。
+
+```lean
+import src.features.«edit-routine».model.Access
+```
+
+生成コードは各要素を`«edit-routine»`のように引用し、ファイル配置は変更しません。Leanの引用識別子は引用前と同じ名前を表し、ハイフンも保持します。[Leanの識別子仕様](https://lean-lang.org/doc/reference/latest/Source-Files-and-Modules/)
+
+対応するパス要素はASCII英字または`_`で始まり、以降はASCII英数字・`_`・`-`です。config root外の仕様、識別子に埋め込まれた区切り・ドット・改行・引用記号は拒否します。コンパイル対象も作業ディレクトリ内に制限し、外部へ解決されるsymlinkを拒否します。契約のnamespace・公開宣言名は従来どおり単純な識別子を使います。
+
+純粋関数の自動証明は`simp`・分岐分割・`omega`を試し、残る命題には`grind`を試します。booleanの含意からdisjunctionを導く契約もそのまま記述できます。生成された証明は引き続きLeanカーネルと公理監査で検査し、証明失敗を成功扱いにはしません。
 
 ## 純粋関数の静的DIと局所更新
 

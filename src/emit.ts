@@ -95,5 +95,7 @@ export function emitProof(
     leanName(contract),
     ...ir.functions.map((f) => `Ts2LeanGenerated.${f.name}`),
   ];
-  return `import Model\n\nset_option maxHeartbeats ${heartbeats}\n\ntheorem ts2lean_verified : Ts2Lean.Satisfies ${leanName(contract)} Ts2LeanGenerated.${ir.target} := by\n  simp_all [${unfold.join(", ")}]\n  all_goals intros\n  all_goals repeat' (split at *)\n  all_goals try simp_all [Bool.and_assoc, Bool.or_assoc]\n  all_goals omega\n\n#ts2lean_audit ts2lean_verified\n`;
+  // Keep the arithmetic fast path; grind also discharges boolean implications
+  // and disjunctions that omega alone cannot derive. Both produce checked proofs.
+  return `import Model\n\nset_option maxHeartbeats ${heartbeats}\n\ntheorem ts2lean_verified : Ts2Lean.Satisfies ${leanName(contract)} Ts2LeanGenerated.${ir.target} := by\n  simp_all [${unfold.join(", ")}]\n  all_goals intros\n  all_goals repeat' (split at *)\n  all_goals try simp_all [Bool.and_assoc, Bool.or_assoc]\n  all_goals first | omega | grind\n\n#ts2lean_audit ts2lean_verified\n`;
 }

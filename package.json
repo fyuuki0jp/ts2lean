@@ -1,6 +1,6 @@
 {
   "name": "@fyuuki0jp/ts2lean",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Verify TypeScript functions and transactional ledger services against Lean 4 contracts",
   "type": "module",
   "bin": {

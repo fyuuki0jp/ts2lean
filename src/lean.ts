@@ -7,6 +7,7 @@ import {
   mkdtemp,
   readdir,
   copyFile,
+  realpath,
 } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -175,23 +176,38 @@ export class LeanWorkspace {
   exec(args: string[]) {
     return run(this.command, args, this.dir, this.env, this.config.timeoutMs);
   }
-  module(file: string): string {
+  private specificationPath(file: string): string {
     const rel = path.relative(
       this.config.root,
       path.resolve(this.config.root, file),
     );
-    if (rel.startsWith("..") || !rel.endsWith(".lean"))
+    if (rel === ".." || rel.startsWith(".." + path.sep) || path.isAbsolute(rel) || !rel.endsWith(".lean"))
       throw new Failure(
         "spec-error",
         "Specification must be a .lean file inside the config directory.",
       );
     const parts = rel.slice(0, -5).split(path.sep);
-    if (!parts.every((p) => /^[A-Za-z_]\w*$/.test(p)))
+    if (!parts.every((p) => /^[A-Za-z_][A-Za-z0-9_-]*$/.test(p)))
       throw new Failure("spec-error", `Invalid Lean module path: ${rel}`);
-    return parts.join(".");
+    return rel;
+  }
+  module(file: string): string {
+    // A quoted Lean identifier preserves hyphens and keywords without renaming
+    // the source tree. Keep this syntax separate from filesystem paths.
+    return this.specificationPath(file).slice(0, -5).split(path.sep)
+      .map((part) => `«${part}»`).join(".");
   }
   async compile(file: string): Promise<void> {
     file = path.resolve(this.dir, file);
+    const inside = (root: string, target: string): boolean => {
+      const rel = path.relative(root, target);
+      return rel !== ".." && !rel.startsWith(".." + path.sep) && !path.isAbsolute(rel);
+    };
+    if (!inside(this.dir, file) || !file.endsWith(".lean"))
+      throw new Failure("spec-error", "Compilation target must be a .lean file inside the workspace.");
+    const [rootPath, sourcePath] = await Promise.all([realpath(this.dir), realpath(file)]);
+    if (!inside(rootPath, sourcePath))
+      throw new Failure("spec-error", "Compilation target resolves outside the workspace.");
     if (this.compiled.has(file)) return;
     if (this.building.has(file))
       throw new Failure("spec-error", `Cyclic Lean import: ${file}`);
@@ -211,9 +227,9 @@ export class LeanWorkspace {
     this.building.delete(file);
   }
   async discover(spec: string): Promise<ContractInfo[]> {
-    await this.compile("Ts2Lean/Inspect.lean");
     const module = this.module(spec);
-    await this.compile(module.replaceAll(".", path.sep) + ".lean");
+    await this.compile("Ts2Lean/Inspect.lean");
+    await this.compile(this.specificationPath(spec));
     const filename = path.join(this.dir, "InspectContract.lean");
     await writeFile(
       filename,
@@ -274,9 +290,9 @@ export class LeanWorkspace {
     return infos;
   }
   async inspect(spec: string, contract: string): Promise<ContractInfo> {
-    await this.compile("Ts2Lean/Inspect.lean");
     const module = this.module(spec);
-    await this.compile(module.replaceAll(".", path.sep) + ".lean");
+    await this.compile("Ts2Lean/Inspect.lean");
+    await this.compile(this.specificationPath(spec));
     const filename = path.join(this.dir, "InspectContract.lean");
     await writeFile(
       filename,

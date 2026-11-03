@@ -167,6 +167,8 @@ tsc --runExternalCode --noEmit
 
 Content Mapperも`bindings`なしで契約を自動検出します。Leanモジュールの起点は`tsconfig.json`のディレクトリです。追加のLeanソースディレクトリなどが必要なら、`contentMappers[].options`に`leanPaths`等の検証オプションを指定してください。Viteプラグインと同じLean環境を指定します。
 
+0.1.1から`src/features/edit-routine/model/Access.lean`のようなkebab-caseのパスにも対応しています。契約を所有モジュール内に置いたまま、リポジトリrootの単一設定から通常の相対importで使えます。Lean同士のimportは`import src.features.«edit-routine».model.Access`と書きます。[パスの対応範囲と構文拡張の計画](docs/semantics.md)を参照してください。
+
 `.lean`拡張子を明記してください。テストでは契約を値としてimportします。実装でLean由来の入力型を使いたい場合は、従来どおりtype importも使えます。
 
 ```ts
@@ -186,7 +188,7 @@ importした関数 + importしたLean契約
 
 AST解析・型検査にはTypeScript **7.1.0-beta**のnative API（`typescript/sync`・`typescript/ast`）を使います。検証済みのLean型定義は仮想ファイルとして渡し、解析終了時にnativeセッションを解放します。TypeScriptは実行時依存として配布し、Viteのソース書換えに使う`magic-string`は開発依存としてプラグインへbundleします。
 
-`npm run test:package`は配布用tarballを一時ディレクトリへ本番依存だけでインストールし、CLI・native compiler・Viteの変換を確認します。
+`npm run test:package`は配布用tarballを一時ディレクトリへ本番依存だけでインストールし、CLI・native compiler・Viteの変換を確認します。さらに外部プロジェクトのdevDependencyとして導入し、kebab-caseの所有モジュール間のLean依存、Content Mapperの型検査、Vitestの実証明を確認します。
 
 生成したモデル・証明・IRはプロジェクトの`.ts2lean/run-*/`に保存します。元のコードや仕様は上書きしません。Lean検査は毎回独立した作業ディレクトリで行います。ルートの`Model.lean`、`Proof.lean`、`InspectContract.lean`は生成用の予約名です。独自Lake依存やmathlibの取得は初版の対象外です。
 

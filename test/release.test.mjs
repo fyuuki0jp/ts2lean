@@ -22,6 +22,7 @@ test("CD writes separate GitHub Actions output records", () => {
       env: {...process.env, GITHUB_REF:input.ref, GITHUB_SHA:input.sha,
         GITHUB_RUN_NUMBER:input.run, GITHUB_RUN_ATTEMPT:input.attempt, GITHUB_OUTPUT:output},
     });
-    assert.equal(readFileSync(output, "utf8"), "version=0.1.0-dev.42.1.gaaaaaaaaaaaa\ntag=next\n");
+    const {version} = JSON.parse(readFileSync("package.json", "utf8"));
+    assert.equal(readFileSync(output, "utf8"), `version=${version}-dev.42.1.gaaaaaaaaaaaa\ntag=next\n`);
   } finally { rmSync(dir, {recursive:true, force:true}); }
 });

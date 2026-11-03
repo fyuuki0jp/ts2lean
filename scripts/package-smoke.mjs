@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { existsSync } from "node:fs";
@@ -95,18 +95,38 @@ console.log("production install: native compiler, CLI, and bundled Vite transfor
   await rm(path.join(dir, "package-lock.json"), { force: true });
   run(npm, ["install", "--save-dev", "--ignore-scripts", "--no-audit", "--no-fund",
     path.join(dir, packed.filename), "vite@8.3.5", "vitest@5.0.5", "@types/node@24.10.0"], dir);
-  await writeFile(path.join(dir, "Spec.lean"), `import Ts2Lean.Contract
-namespace Spec
+  const accessDir = path.join(dir, "src/features/edit-routine/model");
+  const sessionDir = path.join(dir, "src/features/arrange-project-canvas/model");
+  await mkdir(accessDir, {recursive:true});
+  await mkdir(sessionDir, {recursive:true});
+  await writeFile(path.join(sessionDir, "Shared-law.lean"), `import Ts2Lean.Contract
+namespace SharedLaw
+def next (x : Int) : Int := x + 1
+end SharedLaw
+`);
+  await writeFile(path.join(accessDir, "Access.lean"), `import src.features.«arrange-project-canvas».model.«Shared-law»
+namespace Access
 def increment : Ts2Lean.Contract Int Int where
   pre := fun _ => True
-  post := fun x y => y = x + 1
-end Spec
+  post := fun x y => y = SharedLaw.next x
+end Access
+`);
+  await writeFile(path.join(sessionDir, "Session.lean"), `import src.features.«edit-routine».model.Access
+namespace Session
+def advance : Ts2Lean.Contract Int Int where
+  pre := fun _ => True
+  post := fun x y => y = SharedLaw.next x
+end Session
 `);
   await writeFile(path.join(dir, "consumer.test.ts"), `import {expect,test} from "vitest";
 import "@fyuuki0jp/ts2lean/vitest";
 import {run} from "./main";
-import {increment} from "./Spec.lean";
-test("installed package verifies the actual function", async()=>{await expect(run).toVerify(increment);});
+import {increment} from "./src/features/edit-routine/model/Access.lean";
+import {advance} from "./src/features/arrange-project-canvas/model/Session.lean";
+test("installed package verifies the actual function through kebab-case module imports", async()=>{
+  await expect(run).toVerify(increment);
+  await expect(run).toVerify(advance);
+});
 `);
   await writeFile(path.join(dir, "vitest.config.ts"), `import {defineConfig} from "vitest/config";
 import {ts2lean} from "@fyuuki0jp/ts2lean/vite";
