@@ -1,0 +1,63 @@
+# One-time recovery of the two immutable, fully verified initial release artifacts.
+# Remove after both registry installation checks succeed.
+name: Publish verified initial packages
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+  packages: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - run: '41621937670'
+            version: '0.1.0'
+            tag: latest
+          - run: '41621937567'
+            version: '0.1.0-dev.2.1.g64201d036dee'
+            tag: next
+    env:
+      PACKAGE_VERSION: ${{ matrix.version }}
+      PACKAGE_TAG: ${{ matrix.tag }}
+    steps:
+      - name: Require the successful verification job
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_RUN: ${{ matrix.run }}
+        run: |
+          test "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN" --jq .head_sha)" = 64201d036dee7fa9e79e29da39dbf445b68d4f42
+          test "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN/jobs" --jq '[.jobs[] | select(.name == "verify" and .conclusion == "success")] | length')" = 1
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-package
+          path: package
+          run-id: ${{ matrix.run }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: https://npm.pkg.github.com
+          scope: '@fyuuki0jp'
+      - run: npm install --global npm@12.2.1
+      - name: Check artifact identity
+        run: |
+          tar -xOf "./package/fyuuki0jp-ts2lean-$PACKAGE_VERSION.tgz" package/package.json | node --input-type=module -e 'import {readFileSync} from "node:fs"; import assert from "node:assert/strict"; const p=JSON.parse(readFileSync(0,"utf8")); assert.equal(p.name,"@fyuuki0jp/ts2lean"); assert.equal(p.version,process.env.PACKAGE_VERSION);'
+      - name: Publish verified tarball
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm publish ./package/*.tgz --ignore-scripts --tag "$PACKAGE_TAG"
+      - name: Verify registry installation
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir consumer
+          cd consumer
+          npm init -y
+          npm install --save-dev --ignore-scripts "@fyuuki0jp/ts2lean@$PACKAGE_VERSION"
+          npm exec -- ts2lean --help
+          node --input-type=module -e 'import { ts2lean } from "@fyuuki0jp/ts2lean/vite"; if (typeof ts2lean !== "function") process.exit(1)'

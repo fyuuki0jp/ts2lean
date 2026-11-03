@@ -100,7 +100,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PACKAGE_TAG: ${{ needs.verify.outputs.package-tag }}
-        run: npm publish package/*.tgz --ignore-scripts --tag "$PACKAGE_TAG"
+        run: npm publish ./package/*.tgz --ignore-scripts --tag "$PACKAGE_TAG"
       - name: Verify registry installation
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
