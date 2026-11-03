@@ -88,6 +88,7 @@ export class LeanWorkspace {
   static async create(
     config: ResolvedConfig,
     override?: { file: string; content: string },
+    snapshot?: Readonly<Record<string, string>>,
   ): Promise<LeanWorkspace> {
     const base = path.join(config.root, ".ts2lean");
     await mkdir(base, { recursive: true });
@@ -151,9 +152,24 @@ export class LeanWorkspace {
         await writeFile(to, content);
       }
     };
-    await copySources(path.join(packageRoot, "lean"));
-    await copySources(config.root);
-    for (const root of config.leanPaths) await copySources(root);
+    if (snapshot) {
+      for (const root of [path.join(packageRoot, "lean"), config.root, ...config.leanPaths]) {
+        for (const [file, content] of Object.entries(snapshot)) {
+          const relative = path.relative(root, file);
+          if (relative.startsWith("..") || path.isAbsolute(relative)) continue;
+          if (["Model.lean", "Proof.lean", "InspectContract.lean"].includes(relative))
+            throw new Failure("spec-error", `Reserved generated module name: ${relative}`);
+          const to = path.join(ws.dir, relative);
+          if (await exists(to)) throw new Failure("spec-error", `Lean module collision: ${relative}`);
+          await mkdir(path.dirname(to), { recursive: true });
+          await writeFile(to, content);
+        }
+      }
+    } else {
+      await copySources(path.join(packageRoot, "lean"));
+      await copySources(config.root);
+      for (const root of config.leanPaths) await copySources(root);
+    }
     return ws;
   }
   exec(args: string[]) {

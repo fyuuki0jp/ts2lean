@@ -1,4 +1,9 @@
-import { ts } from "@ts-morph/common";
+import {
+  SymbolFlags,
+  type Checker,
+  type Symbol as CompilerSymbol,
+} from "typescript/sync";
+import * as ts from "typescript/ast";
 
 export type FunctionNode =
   | ts.FunctionDeclaration
@@ -47,7 +52,7 @@ export type StaticValue =
   | StaticObject
   | StaticScalar
   | StaticExternal;
-export type StaticEnv = Map<ts.Symbol, StaticValue>;
+export type StaticEnv = Map<CompilerSymbol, StaticValue>;
 export interface CompositionCheck {
   source: string;
   reference: string;
@@ -57,21 +62,21 @@ export interface CompositionCheck {
 
 /** An AST interpreter for wiring only. It never runs user JavaScript. */
 export function staticResolver(
-  checker: ts.TypeChecker,
+  checker: Checker,
   fail: (n: ts.Node, message: string) => never,
   options: {
     allowAsync?: boolean;
     external?: (declaration: ts.VariableDeclaration) => boolean;
   } = {},
 ) {
-  const cache = new Map<ts.Symbol, StaticValue>();
-  const active = new Set<ts.Symbol>();
+  const cache = new Map<CompilerSymbol, StaticValue>();
+  const active = new Set<CompilerSymbol>();
   const activeFactories = new Set<FunctionNode>();
   const checks: CompositionCheck[] = [];
-  const symbol = (n: ts.Node): ts.Symbol => {
+  const symbol = (n: ts.Node): CompilerSymbol => {
     let s = checker.getSymbolAtLocation(n);
     if (!s) return fail(n, "Unresolved static dependency");
-    if (s.flags & ts.SymbolFlags.Alias) s = checker.getAliasedSymbol(s);
+    if (s.flags & SymbolFlags.Alias) s = checker.getAliasedSymbol(s);
     return s;
   };
   const member = (
@@ -99,6 +104,7 @@ export function staticResolver(
       );
     for (const e of name.elements) {
       if (
+        !e.name ||
         e.dotDotDotToken ||
         e.initializer ||
         (e.propertyName && !ts.isIdentifier(e.propertyName))
@@ -131,19 +137,19 @@ export function staticResolver(
         "Async, generators, ambient, and generic functions are unsupported in the pure profile",
       );
     for (const p of fn.parameters)
-      if (p.initializer || p.questionToken || p.dotDotDotToken)
-        return fail(p, "Use required parameters without defaults or rest");
+      if (p.initializer || p.questionToken || p.dotDotDotToken || (ts.isIdentifier(p.name) && p.name.text === "this"))
+        return fail(p, "Use required data parameters without defaults, rest, or this");
   };
   const resolveSymbol = (
-    s: ts.Symbol,
+    s: CompilerSymbol,
     at: ts.Node,
     env: StaticEnv,
   ): StaticValue => {
-    if (s.flags & ts.SymbolFlags.Alias) s = checker.getAliasedSymbol(s);
+    if (s.flags & SymbolFlags.Alias) s = checker.getAliasedSymbol(s);
     if (env.has(s)) return env.get(s)!;
     if (cache.has(s)) return cache.get(s)!;
     if (active.has(s)) return fail(at, "Cyclic static composition");
-    const d = s.valueDeclaration;
+    const d = s.valueDeclaration?.resolve();
     if (!d) return fail(at, "Dependency has no local implementation");
     if (d.getSourceFile().isDeclarationFile)
       return fail(at, "External dependencies are unsupported");
@@ -213,7 +219,7 @@ export function staticResolver(
         ts.isIdentifier(n.expression) &&
         checker
           .getSymbolAtLocation(n.expression)
-          ?.declarations?.some(ts.isNamespaceImport)
+          ?.declarations.some((d) => ts.isNamespaceImport(d.resolve()!))
       )
         return resolveSymbol(symbol(n.name), n, env);
       return member(resolve(n.expression, env), n.name.text, n);
@@ -226,6 +232,7 @@ export function staticResolver(
       const fields = new Map<string, StaticValue>();
       for (const p of n.properties) {
         if (
+          ts.isSpreadAssignment(p) ||
           !p.name ||
           !ts.isIdentifier(p.name) ||
           p.name.text === "__proto__" ||

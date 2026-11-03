@@ -1,5 +1,5 @@
 import { defineConfig } from "vitest/config";
-import { ts2lean } from "ts2lean/vite";
+import { ts2lean } from "@fyuuki0jp/ts2lean/vite";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";

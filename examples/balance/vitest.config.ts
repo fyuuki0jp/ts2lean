@@ -1,5 +1,5 @@
 import { defineConfig } from "vitest/config";
-import { ts2lean } from "ts2lean/vite";
+import { ts2lean } from "@fyuuki0jp/ts2lean/vite";
 
 export default defineConfig({
   root: import.meta.dirname,

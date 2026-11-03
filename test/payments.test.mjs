@@ -8,7 +8,8 @@ import { LeanWorkspace } from "../dist/lean.js";
 import { createProject } from "../dist/project.js";
 import { compileEffects } from "../dist/effects/compiler.js";
 import { emitEffects } from "../dist/effects/emit.js";
-import { ts } from "@ts-morph/common";
+import * as ts from "typescript/ast";
+import { withSourceFile } from "../dist/native.js";
 
 const root = path.resolve("examples/payments");
 const entries = (file) =>
@@ -17,33 +18,29 @@ const entries = (file) =>
     name,
   }));
 function withSettlementFinally(source, finalizer) {
-  const sf = ts.createSourceFile(
-    "service.ts",
-    source,
-    ts.ScriptTarget.Latest,
-    true,
-  );
-  const callbacks = [];
-  const visit = (n) => {
-    if (
-      ts.isCallExpression(n) &&
-      ts.isPropertyAccessExpression(n.expression) &&
-      n.expression.name.text === "transaction"
-    )
-      callbacks.push(n.arguments[0]);
-    ts.forEachChild(n, visit);
-  };
-  visit(sf);
-  const body = callbacks.at(-1).body;
-  return (
-    source.slice(0, body.getStart() + 1) +
-    "\ntry {" +
-    source.slice(body.getStart() + 1, body.end - 1) +
-    "\n} finally {" +
-    finalizer +
-    "}\n" +
-    source.slice(body.end - 1)
-  );
+  return withSourceFile("service.ts", source, (sf) => {
+    const callbacks = [];
+    const visit = (n) => {
+      if (
+        ts.isCallExpression(n) &&
+        ts.isPropertyAccessExpression(n.expression) &&
+        n.expression.name.text === "transaction"
+      )
+        callbacks.push(n.arguments[0]);
+      n.forEachChild(visit);
+    };
+    visit(sf);
+    const body = callbacks.at(-1).body;
+    return (
+      source.slice(0, body.getStart() + 1) +
+      "\ntry {" +
+      source.slice(body.getStart() + 1, body.end - 1) +
+      "\n} finally {" +
+      finalizer +
+      "}\n" +
+      source.slice(body.end - 1)
+    );
+  });
 }
 test("effect extraction proves actual callbacks and rejects unsafe changes and omitted effects", async () => {
   const ws = await LeanWorkspace.create(createProject(root));

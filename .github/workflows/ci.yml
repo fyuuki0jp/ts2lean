@@ -1,14 +1,29 @@
-name: CI
-on: [push, pull_request]
+name: CI and Packages
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: packages-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
   verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
+    outputs:
+      package-tag: ${{ steps.release.outputs.tag }}
+      package-version: ${{ steps.release.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
           cache: npm
+      - run: npm install --global npm@12.2.1
       - name: Install pinned Lean toolchain
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o /tmp/elan-init.sh
@@ -24,7 +39,30 @@ jobs:
       - run: npm run verify:example
       - run: npm run verify:payments
       - run: npm run typecheck:payments
-      - run: npm pack --dry-run
+      - run: npm run verify:payments-ui
+      - run: npm run typecheck:payments-ui
+      - run: npm run build:payments-ui
+      - run: npm run test:package
+      - name: Select package version
+        id: release
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+        run: node scripts/release-info.mjs
+      - name: Pack verified build
+        if: steps.release.outputs.version != ''
+        env:
+          PACKAGE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          npm version "$PACKAGE_VERSION" --no-git-tag-version --ignore-scripts --allow-same-version
+          mkdir -p .ts2lean/release
+          npm pack --ignore-scripts --pack-destination .ts2lean/release
+      - uses: actions/upload-artifact@v4
+        if: steps.release.outputs.version != ''
+        with:
+          name: npm-package
+          path: .ts2lean/release/*.tgz
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
       - name: Preserve differential replay cases
         if: always()
         uses: actions/upload-artifact@v4
@@ -39,3 +77,38 @@ jobs:
             examples/payments/.ts2lean/differential-*/case-*.json*
             examples/payments/.ts2lean/differential-*/failure-*.json
             examples/payments/.ts2lean/differential-*/report.json
+
+  publish:
+    needs: verify
+    if: needs.verify.outputs.package-version != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-package
+          path: package
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: https://npm.pkg.github.com
+          scope: '@fyuuki0jp'
+      - run: npm install --global npm@12.2.1
+      - name: Publish to GitHub Packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGE_TAG: ${{ needs.verify.outputs.package-tag }}
+        run: npm publish package/*.tgz --ignore-scripts --tag "$PACKAGE_TAG"
+      - name: Verify registry installation
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGE_VERSION: ${{ needs.verify.outputs.package-version }}
+        run: |
+          mkdir consumer
+          cd consumer
+          npm init -y
+          npm install --save-dev --ignore-scripts "@fyuuki0jp/ts2lean@$PACKAGE_VERSION"
+          npm exec -- ts2lean --help
+          node --input-type=module -e 'import { ts2lean } from "@fyuuki0jp/ts2lean/vite"; if (typeof ts2lean !== "function") process.exit(1)'

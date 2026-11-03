@@ -9,6 +9,6 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "contentMappers": [{"package": "ts2lean", "extensions": [".lean"]}],
+  "contentMappers": [{"package": "@fyuuki0jp/ts2lean", "extensions": [".lean"]}],
   "include": ["*.ts"]
 }

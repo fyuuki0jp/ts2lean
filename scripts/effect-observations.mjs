@@ -1,4 +1,6 @@
-import { ts } from "@ts-morph/common";
+import { ScriptTarget } from "typescript/ast";
+import { ModuleKind } from "typescript/sync";
+import { withAPI } from "../dist/native.js";
 export const input = {
   operationId: "case",
   from: "alice",
@@ -28,12 +30,14 @@ function tag(value, thrown) {
 }
 
 export async function nativeObservations(source, sites) {
-  const code = ts.transpileModule(source, {
-    compilerOptions: {
-      target: ts.ScriptTarget.ES2022,
-      module: ts.ModuleKind.CommonJS,
-    },
-  }).outputText;
+  const code = withAPI((api) =>
+    api.transpileModule(source, {
+      compilerOptions: {
+        target: ScriptTarget.ES2022,
+        module: ModuleKind.CommonJS,
+      },
+    }),
+  ).outputText;
   const observations = new Set();
   // Every encountered primitive can succeed, reject before, or reject after
   // its effect. Unused suffixes are harmless and deduplicated.

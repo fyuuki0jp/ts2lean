@@ -1,3 +1,4 @@
+import type { FunctionGraph } from "../object-context.js";
 import path from "node:path";
 import { readFile, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
@@ -11,7 +12,7 @@ import {
   type Result,
   type VerificationOptions,
 } from "../types.js";
-import { compileEffects, type EffectIR } from "./compiler.js";
+import { compileEffects, compileEffectObjects, type EffectIR } from "./compiler.js";
 import { emitEffects } from "./emit.js";
 
 export async function verifyEffects(
@@ -19,6 +20,7 @@ export async function verifyEffects(
   contract: LeanContract,
   options: VerificationOptions = {},
   checkSources?: (ir: EffectIR) => void,
+  graph?: FunctionGraph,
 ): Promise<Result> {
   let artifact: string | undefined;
   try {
@@ -26,7 +28,7 @@ export async function verifyEffects(
       ...contract.options,
       ...options,
     });
-    const ws = await LeanWorkspace.create(config);
+    const ws = await LeanWorkspace.create(config, undefined, contract.sources);
     await ws.compile("Ts2Lean/LedgerEffects.lean");
     const declarations = new Map<string, ContractInfo[]>();
     const specs = new Set([
@@ -42,11 +44,10 @@ export async function verifyEffects(
         "spec-error",
         "Expected a Lean operation or system contract",
       );
-    const ir = compileEffects(
-      entries,
-      declarations,
-      target.kind === "operation",
-    );
+    const prepared = graph ? await graph.prepare(config) : undefined;
+    const ir = graph
+      ? graph.compile(prepared!, (session) => compileEffectObjects(session, target.kind === "operation"))
+      : compileEffects(entries, declarations, target.kind === "operation");
     if (!ir.transactions.length)
       throw new Failure(
         "unsupported",
@@ -79,7 +80,7 @@ export async function verifyEffects(
     const axioms = [
       ...new Set(audits.flatMap((l) => JSON.parse(l.slice(15)) as string[])),
     ];
-    for (const [file, hash] of Object.entries(ir.sourceHashes)) {
+    if (!graph) for (const [file, hash] of Object.entries(ir.sourceHashes)) {
       const current = createHash("sha256")
         .update(await readFile(file))
         .digest("hex");

@@ -10,7 +10,7 @@
   },
   "contentMappers": [
     {
-      "package": "ts2lean",
+      "package": "@fyuuki0jp/ts2lean",
       "extensions": [".lean"]
     }
   ],

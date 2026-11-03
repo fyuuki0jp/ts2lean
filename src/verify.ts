@@ -1,9 +1,12 @@
+import { createProject } from "./project.js";
+import type { FunctionGraph } from "./object-context.js";
 import { moduleTypes, effectTypes } from "./module-types.js";
 import path from "node:path";
 import { writeFile } from "node:fs/promises";
 import { LeanWorkspace } from "./lean.js";
 import {
   compileTypeScript,
+  compileFunctionObject,
   importedLeanFiles,
   type ModuleIR,
 } from "./compiler.js";
@@ -14,6 +17,9 @@ import {
   type ResolvedConfig,
   type Result,
   type ContractInfo,
+  type Binding,
+  type LeanContract,
+  type VerificationOptions,
 } from "./types.js";
 export function contractExportName(info: ContractInfo): string {
   const name = info.name.split(".").at(-1)!;
@@ -129,65 +135,7 @@ export async function processBindings(
         virtual,
       );
       checkSources?.(ir);
-      const model = path.join(ws.dir, "Model.lean");
-      await writeFile(model, emitModel(ir, ws.module(binding.spec)));
-      await writeFile(
-        path.join(ws.dir, "ir.json"),
-        JSON.stringify(ir, null, 2) + "\n",
-      );
-      await ws.compile("Model.lean");
-      if (mode === "extract") {
-        results.push({
-          status: "extracted",
-          module: binding.module,
-          export: binding.export,
-          message:
-            "Lean model generated and typechecked; no proof has been claimed.",
-          artifact: model,
-        });
-        continue;
-      }
-      const proof = path.join(ws.dir, "Proof.lean");
-      await writeFile(
-        proof,
-        emitProof(ir, binding.contract, config.maxHeartbeats, target!.unfold),
-      );
-      const outcome = await ws.exec([proof]);
-      if (
-        outcome.code !== 0 ||
-        outcome.output.includes("declaration uses `sorry`")
-      ) {
-        results.push({
-          status: "unproved",
-          module: binding.module,
-          export: binding.export,
-          message: outcome.output,
-          artifact: proof,
-        });
-        continue;
-      }
-      const line = outcome.output
-        .split("\n")
-        .find((l) => l.includes("TS2LEAN_AXIOMS:"));
-      if (!line)
-        throw new Failure(
-          "tool-error",
-          "Proof finished without an axiom audit.",
-        );
-      const axioms = JSON.parse(
-        line.slice(line.indexOf("TS2LEAN_AXIOMS:") + 15),
-      ) as string[];
-      // Dependencies may have been replaced while Lean was running.
-      checkSources?.(ir);
-      results.push({
-        status: "verified",
-        module: binding.module,
-        export: binding.export,
-        message:
-          "Lean checked the generated-model theorem and its axiom dependencies.",
-        artifact: proof,
-        axioms,
-      });
+      results.push(await proveModule(ws, ir, binding, target, mode, checkSources));
     } catch (error) {
       results.push({
         status: error instanceof Failure ? error.status : "tool-error",
@@ -199,6 +147,60 @@ export async function processBindings(
   }
   return results;
 }
+async function proveModule(
+  ws: LeanWorkspace,
+  ir: ModuleIR,
+  binding: Binding,
+  target: ContractInfo,
+  mode: "verify" | "extract",
+  check?: (ir: ModuleIR) => void,
+): Promise<Result> {
+  check?.(ir);
+  const model = path.join(ws.dir, "Model.lean");
+  await writeFile(model, emitModel(ir, ws.module(binding.spec)));
+  await writeFile(path.join(ws.dir, "ir.json"), JSON.stringify(ir, null, 2) + "\n");
+  await ws.compile("Model.lean");
+  if (mode === "extract") return {
+    status: "extracted", module: binding.module, export: binding.export,
+    message: "Lean model generated and typechecked; no proof has been claimed.", artifact: model,
+  };
+  const proof = path.join(ws.dir, "Proof.lean");
+  await writeFile(proof, emitProof(ir, binding.contract, ws.config.maxHeartbeats, target.unfold));
+  const outcome = await ws.exec([proof]);
+  if (outcome.code !== 0 || outcome.output.includes("declaration uses `sorry`"))
+    return { status: "unproved", module: binding.module, export: binding.export,
+      message: outcome.output, artifact: proof };
+  const line = outcome.output.split("\n").find((l) => l.includes("TS2LEAN_AXIOMS:"));
+  if (!line) throw new Failure("tool-error", "Proof finished without an axiom audit.");
+  const axioms = JSON.parse(line.slice(line.indexOf("TS2LEAN_AXIOMS:") + 15)) as string[];
+  check?.(ir);
+  return { status: "verified", module: binding.module, export: binding.export,
+    message: "Lean checked the generated model and its axiom dependencies.", artifact: proof, axioms };
+}
+
+export async function verifyLoadedFunction(
+  graph: FunctionGraph,
+  contract: LeanContract,
+  options: VerificationOptions,
+): Promise<Result> {
+  const source = graph.sources.get(graph.targets[0]!)!;
+  const binding = { module: source.module, export: source.name, spec: contract.spec, contract: contract.name };
+  try {
+    const config = createProject(contract.root, { ...contract.options, ...options });
+    const ws = await LeanWorkspace.create(config, undefined, contract.sources);
+    const target = (await ws.discover(contract.spec)).find((info) => info.name === contract.name);
+    if (!target || (target.kind && target.kind !== "pure"))
+      throw new Failure("spec-error", "Expected a pure function contract");
+    const contexts = await graph.prepare(config);
+    const ir = graph.compile(contexts, (session) => compileFunctionObject(session, target));
+    return await proveModule(ws, ir, binding, target, "verify", () => graph.check());
+  } catch (error) {
+    return { status: error instanceof Failure ? error.status : "tool-error",
+      module: source.module, export: source.name,
+      message: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 export const verify = (config: ResolvedConfig): Promise<Result[]> =>
   processBindings(config, "verify");
 export const extract = (config: ResolvedConfig): Promise<Result[]> =>

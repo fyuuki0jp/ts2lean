@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import "ts2lean/vitest";
+import "@fyuuki0jp/ts2lean/vitest";
 import { withdraw } from "./balance";
 import { withdraw as withdrawContract } from "./Balance.lean";
 

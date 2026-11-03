@@ -8,7 +8,7 @@ import { Mapper } from "../dist/mapper.js";
 import { run } from "../dist/lean.js";
 
 async function packageLink() {
-  const link = path.join(root, "node_modules/ts2lean");
+  const link = path.join(root, "node_modules/@fyuuki0jp/ts2lean");
   try {
     const info = await lstat(link);
     if (info.isSymbolicLink()) return;
@@ -91,7 +91,7 @@ export function run(x: contract['input']): contract['output'] { return x + 1n; }
           verbatimModuleSyntax: true,
           outDir: ".js",
         },
-        contentMappers: [{ package: "ts2lean", extensions: [".lean"] }],
+        contentMappers: [{ package: "@fyuuki0jp/ts2lean", extensions: [".lean"] }],
         include: ["main.ts"],
       }),
     );

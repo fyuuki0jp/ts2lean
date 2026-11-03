@@ -2,7 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { writeFile } from "node:fs/promises";
-import { ts } from "@ts-morph/common";
+import { ScriptTarget } from "typescript/ast";
+import { ModuleKind } from "typescript/sync";
+import { withAPI } from "../dist/native.js";
 import { fixture, intSpec } from "./helpers.mjs";
 import { compileTypeScript } from "../dist/compiler.js";
 import { emitModel, emitProof } from "../dist/emit.js";
@@ -42,12 +44,14 @@ export function updates(x:bigint):bigint {
     const js = await import(
       "data:text/javascript;base64," +
         Buffer.from(
-          ts.transpileModule(source, {
-            compilerOptions: {
-              target: ts.ScriptTarget.ES2022,
-              module: ts.ModuleKind.ESNext,
-            },
-          }).outputText,
+          withAPI((api) =>
+            api.transpileModule(source, {
+              compilerOptions: {
+                target: ScriptTarget.ES2022,
+                module: ModuleKind.ESNext,
+              },
+            }),
+          ).outputText,
         ).toString("base64")
     );
     for (const name of ["run", "updates"]) {

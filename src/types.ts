@@ -138,6 +138,8 @@ export interface LeanContract<Input = unknown, Output = unknown> {
   readonly name: string;
   readonly root: string;
   readonly options: VerificationOptions;
+  /** The Lean sources associated with an imported contract value. */
+  readonly sources?: Readonly<Record<string, string>>;
   /** Phantom type information; no input is sampled or executed. */
   readonly types?: { readonly input: Input; readonly output: Output };
 }

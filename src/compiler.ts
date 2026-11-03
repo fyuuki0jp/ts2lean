@@ -1,5 +1,17 @@
+import type { ObjectCompilation } from "./object-context.js";
+import { readFileSync } from "node:fs";
+import { compilerOptions, withAPI, withProgram } from "./native.js";
+import {
+  SymbolFlags,
+  TypeFlags,
+  SignatureKind,
+  type Symbol as CompilerSymbol,
+  type Type,
+  type Program,
+  type Checker,
+} from "typescript/sync";
 import { createHash } from "node:crypto";
-import { ts, getLibFiles } from "@ts-morph/common";
+import * as ts from "typescript/ast";
 import path from "node:path";
 import {
   Failure,
@@ -46,7 +58,11 @@ export interface FunctionIR {
   calls: { target: string; reference: string }[];
   name: string;
   source: string;
+  snapshot?: string;
+  instance?: string;
   parameter: string;
+  /** Declaration order for packing multiple JS arguments into the Lean input record. */
+  parameterNames?: string[];
   input: Shape;
   output: Shape;
   body: Term;
@@ -70,54 +86,40 @@ export function compileTypeScript(
   virtualFiles: Map<string, string>,
 ): ModuleIR {
   module = path.resolve(module);
-  const options: ts.CompilerOptions = {
-    target: ts.ScriptTarget.ES2022,
-    module: ts.ModuleKind.ESNext,
-    moduleResolution: ts.ModuleResolutionKind.Bundler,
-    strict: true,
-    noEmit: true,
-    skipLibCheck: true,
-    exactOptionalPropertyTypes: true,
-    allowImportingTsExtensions: true,
-  };
-  const host = ts.createCompilerHost(options);
-  const libDir = path.dirname(ts.getDefaultLibFilePath(options));
-  const libraries = new Map(
-    getLibFiles().map((lib) => [path.join(libDir, lib.fileName), lib.text]),
+  return withProgram(
+    [module],
+    virtualFiles,
+    { ...compilerOptions, exactOptionalPropertyTypes: true },
+    (program, checker) =>
+      lowerTypeScript(
+        module,
+        exported,
+        contract,
+        virtualFiles,
+        program,
+        checker,
+      ),
   );
-  const originalRead = host.readFile.bind(host),
-    originalExists = host.fileExists.bind(host);
-  host.readFile = (file) =>
-    virtualFiles.get(path.resolve(file)) ??
-    libraries.get(path.resolve(file)) ??
-    originalRead(file);
-  host.fileExists = (file) =>
-    virtualFiles.has(path.resolve(file)) ||
-    libraries.has(path.resolve(file)) ||
-    originalExists(file);
-  host.resolveModuleNames = (names, containing) =>
-    names.map((name) => {
-      if (name.endsWith(".lean")) {
-        const file = path.resolve(path.dirname(containing), name);
-        if (virtualFiles.has(file + ".ts"))
-          return { resolvedFileName: file + ".ts", extension: ts.Extension.Ts };
-        return undefined;
-      }
-      return ts.resolveModuleName(name, containing, options, host)
-        .resolvedModule;
-    });
-  const program = ts.createProgram([module], options, host);
-  const diagnostics = ts.getPreEmitDiagnostics(program);
-  if (diagnostics.length)
-    throw new Failure(
-      "type-error",
-      ts.formatDiagnosticsWithColorAndContext(diagnostics, {
-        getCurrentDirectory: () => process.cwd(),
-        getCanonicalFileName: (f) => f,
-        getNewLine: () => "\n",
-      }),
-    );
-  const checker = program.getTypeChecker();
+}
+
+/** Lower the loaded instance using its own immutable type context. */
+export function compileFunctionObject(runtime: ObjectCompilation, contract: ContractInfo): ModuleIR {
+  const root = runtime.roots[0]!;
+  const context = runtime.context(root);
+  return lowerTypeScript(root.node.getSourceFile().fileName, "", contract,
+    new Map([...context.declarations.keys()].map((file) => [file + ".ts", ""])),
+    context.program, context.checker, runtime);
+}
+
+function lowerTypeScript(
+  module: string,
+  exported: string,
+  contract: ContractInfo,
+  virtualFiles: Map<string, string>,
+  program: Program,
+  checker: Checker,
+  runtime?: ObjectCompilation,
+): ModuleIR {
   const records = new Map<string, Extract<Shape, { kind: "record" }>>();
   const generated: Extract<Shape, { kind: "record" }>[] = [];
   const unions = new Map<string, UnionShape>();
@@ -169,18 +171,18 @@ export function compileTypeScript(
     return s;
   };
   const typeShape = (
-    type: ts.Type,
+    type: Type,
     node: ts.Node,
-    seen = new Set<ts.Type>(),
+    seen = new Set<Type>(),
   ): Shape => {
-    if (type.flags & ts.TypeFlags.BooleanLike) return bool;
-    if (type.isStringLiteral()) {
+    if (type.flags & TypeFlags.BooleanLike) return bool;
+    if (type.isStringLiteralType()) {
       if (!/^[A-Za-z_]\w*$/.test(type.value))
         return fail(node, "Union tags must be simple identifiers");
       return { kind: "literal", value: type.value };
     }
-    if (type.isUnion()) {
-      const variants = type.types.map((t) => {
+    if (type.isUnionType()) {
+      const variants = type.getTypes().map((t) => {
         const r = typeShape(t, node, seen);
         if (r.kind !== "record")
           return fail(node, "Unions require readonly record variants");
@@ -208,16 +210,20 @@ export function compileTypeScript(
         );
       return found;
     }
-    if (type.flags & ts.TypeFlags.BigIntLike) return int;
-    if (!(type.flags & ts.TypeFlags.Object) || type.isUnionOrIntersection())
+    if (type.flags & TypeFlags.BigIntLike) return int;
+    if (
+      !(type.flags & TypeFlags.Object) ||
+      type.isUnionType() ||
+      type.isIntersectionType()
+    )
       return fail(
         node,
         `Only bigint, boolean, and readonly records are supported; got ${checker.typeToString(type)}.`,
       );
     if (seen.has(type)) return fail(node, "Recursive records are unsupported.");
     if (
-      checker.getSignaturesOfType(type, ts.SignatureKind.Call).length ||
-      checker.getSignaturesOfType(type, ts.SignatureKind.Construct).length ||
+      checker.getSignaturesOfType(type, SignatureKind.Call).length ||
+      checker.getSignaturesOfType(type, SignatureKind.Construct).length ||
       checker.getIndexInfosOfType(type).length
     )
       return fail(node, "Callable types and index signatures are unsupported.");
@@ -226,13 +232,13 @@ export function compileTypeScript(
     if (!props.length) return fail(node, "Empty records are unsupported.");
     return intern(
       props.map((p) => {
-        const decls = p.getDeclarations() ?? [];
+        const decls = p.declarations.map((d) => d.resolve()!);
         if (
-          p.flags & ts.SymbolFlags.Optional ||
+          p.flags & SymbolFlags.Optional ||
           !decls.length ||
           !decls.every(
             (d) =>
-              ts.isPropertySignature(d) &&
+              ts.isPropertySignatureDeclaration(d) &&
               d.modifiers?.some(
                 (m) => m.kind === ts.SyntaxKind.ReadonlyKeyword,
               ),
@@ -259,20 +265,21 @@ export function compileTypeScript(
     if (shapeKey(a) !== shapeKey(b))
       fail(node, "Expression and declared contract types differ.");
   };
-  const symbol = (node: ts.Node): ts.Symbol => {
+  const symbol = (node: ts.Node): CompilerSymbol => {
     let s = checker.getSymbolAtLocation(node);
     if (!s) return fail(node, "Unresolved symbol.");
-    if (s.flags & ts.SymbolFlags.Alias) s = checker.getAliasedSymbol(s);
+    if (s.flags & SymbolFlags.Alias) s = checker.getAliasedSymbol(s);
     return s;
   };
   const statics = staticResolver(checker, fail);
   const sourceFiles = program
-    .getSourceFiles()
+    .getSourceFileNames()
+    .map((file) => program.getSourceFile(file)!)
     .filter(
       (sf) =>
         !sf.isDeclarationFile && !virtualFiles.has(path.resolve(sf.fileName)),
     );
-  for (const sf of sourceFiles) {
+  if (!runtime) for (const sf of sourceFiles) {
     if (sf.fileName.includes(`${path.sep}node_modules${path.sep}`))
       fail(sf, "External runtime modules are unsupported.");
     for (const st of sf.statements) {
@@ -280,7 +287,7 @@ export function compileTypeScript(
         if (!st.importClause) fail(st, "Side-effect imports are unsupported.");
         if (
           (st.moduleSpecifier as ts.StringLiteral).text.endsWith(".lean") &&
-          !st.importClause!.isTypeOnly
+          st.importClause!.phaseModifier !== ts.SyntaxKind.TypeKeyword
         )
           fail(st, "Lean imports must use import type.");
         continue;
@@ -313,6 +320,9 @@ export function compileTypeScript(
       );
     }
   }
+  let targetValue: import("./static.js").StaticValue;
+  if (runtime) targetValue = runtime.roots[0]!;
+  else {
   const sf = program.getSourceFile(module)!;
   const moduleSymbol = checker.getSymbolAtLocation(sf);
   const [exportName, ...members] = exported.split(".");
@@ -321,12 +331,13 @@ export function compileTypeScript(
     checker.getExportsOfModule(moduleSymbol).find((s) => s.name === exportName);
   if (!targetSymbol)
     throw new Failure("unsupported", `No exported binding ${exported}`);
-  if (targetSymbol.flags & ts.SymbolFlags.Alias)
+  if (targetSymbol.flags & SymbolFlags.Alias)
     targetSymbol = checker.getAliasedSymbol(targetSymbol);
-  let targetValue = statics.resolveSymbol(targetSymbol, sf, new Map());
+  targetValue = statics.resolveSymbol(targetSymbol, sf, new Map());
   for (const key of members) targetValue = statics.member(targetValue, key, sf);
   if (targetValue.kind !== "function")
     fail(sf, "Select an exported function or service method");
+  }
   const functions: FunctionIR[] = [];
   const compiled = new Map<StaticFunction, FunctionIR>();
   const compiling = new Set<StaticFunction>();
@@ -334,27 +345,35 @@ export function compileTypeScript(
   const compileFunction = (value: StaticFunction): FunctionIR => {
     const previous = compiled.get(value);
     if (previous) return previous;
+    const previousProgram = program, previousChecker = checker;
+    if (runtime) ({ program, checker } = runtime.context(value));
+    try {
     const node = value.node;
     if (compiling.has(value))
       return fail(node, "Recursive calls are unsupported");
     compiling.add(value);
     statics.validateFunction(node);
-    if (node.parameters.length !== 1)
+    if (!node.parameters.length)
       return fail(
         node,
-        "Verified functions take one data input; inject dependencies through a factory",
+        "Verified functions require at least one data input",
       );
     const parameter = node.parameters[0]!;
+    const parameterFields = node.parameters.length > 1 ? node.parameters.map((p) => {
+      if (!ts.isIdentifier(p.name) || p.name.text === "this")
+        return fail(p, "Multiple data parameters require simple identifiers");
+      return { name: p.name.text, shape: typeShape(checker.getTypeAtLocation(p), p) };
+    }) : undefined;
     const signature = checker.getSignatureFromDeclaration(node)!;
     const fn = {
       node,
       name: `fn${functionSerial++}`,
       parameter: "v0",
-      input: typeShape(checker.getTypeAtLocation(parameter), parameter),
+      input: parameterFields ? intern(parameterFields) : typeShape(checker.getTypeAtLocation(parameter), parameter),
       output: typeShape(checker.getReturnTypeOfSignature(signature), node),
     };
     let counter = 1;
-    const locals = new Map<ts.Symbol, Expr>();
+    const locals = new Map<CompilerSymbol, Expr>();
     const bindData = (
       name: ts.BindingName,
       value: Expr,
@@ -368,6 +387,7 @@ export function compileTypeScript(
         return fail(name, "Only object destructuring is supported");
       for (const e of name.elements) {
         if (
+          !e.name ||
           e.dotDotDotToken ||
           e.initializer ||
           (e.propertyName && !ts.isIdentifier(e.propertyName))
@@ -392,12 +412,14 @@ export function compileTypeScript(
         );
       }
     };
-    bindData(
-      parameter.name,
-      { kind: "variable", name: "v0", shape: fn.input },
-      locals,
-    );
-    const mutable = new Set<ts.Symbol>(locals.keys());
+    const input: Expr = { kind: "variable", name: "v0", shape: fn.input };
+    if (parameterFields)
+      node.parameters.forEach((p, i) => bindData(p.name, {
+        kind: "field", object: input, name: parameterFields[i]!.name,
+        shape: parameterFields[i]!.shape,
+      }, locals));
+    else bindData(parameter.name, input, locals);
+    const mutable = new Set<CompilerSymbol>(locals.keys());
     const captures = new Map<
       string,
       { reference: string; type: "int" | "bool"; value: string }
@@ -432,7 +454,7 @@ export function compileTypeScript(
     const discriminant = (
       n: ts.Expression,
       scope: typeof locals,
-    ): { key: ts.Symbol; object: Expr; shape: UnionShape } | undefined => {
+    ): { key: CompilerSymbol; object: Expr; shape: UnionShape } | undefined => {
       if (ts.isParenthesizedExpression(n))
         return discriminant(n.expression, scope);
       if (
@@ -534,7 +556,7 @@ export function compileTypeScript(
         ts.isIdentifier(base) &&
         !scope.has(symbol(base))
       ) {
-        const resolved = statics.resolve(node, value.env);
+        const resolved = runtime ? runtime.resolve(value, node) : statics.resolve(node, value.env);
         if (resolved.kind !== "scalar")
           return fail(
             node,
@@ -578,7 +600,11 @@ export function compileTypeScript(
           if (ts.isShorthandPropertyAssignment(p)) {
             const s = checker.getShorthandAssignmentValueSymbol(p);
             const local = s && scope.get(s);
-            if (!local || p.objectAssignmentInitializer)
+            if (
+              !local ||
+              !ts.isIdentifier(p.name) ||
+              p.objectAssignmentInitializer
+            )
               return fail(p, "Unsupported shorthand property.");
             return {
               name: p.name.text,
@@ -730,16 +756,23 @@ export function compileTypeScript(
       }
       if (ts.isCallExpression(node)) {
         if (
-          node.arguments.length !== 1 ||
           node.typeArguments?.length ||
-          ts.isSpreadElement(node.arguments[0]!)
+          node.arguments.some(ts.isSpreadElement)
         )
-          return fail(node, "Verified calls require one data argument");
-        const resolved = statics.resolve(node.expression, value.env);
+          return fail(node, "Verified calls require explicit data arguments without generics or spread");
+        const resolved = runtime ? runtime.resolve(value, node.expression) : statics.resolve(node.expression, value.env);
         if (resolved.kind !== "function")
           return fail(node, "Call target must resolve to a function");
         const callee = compileFunction(resolved);
-        const argument = coerce(
+        if (node.arguments.length !== resolved.node.parameters.length)
+          return fail(node, "Verified call argument count must match the declaration");
+        const argument: Expr = callee.parameterNames ? {
+          kind: "record", shape: callee.input,
+          fields: callee.parameterNames.map((name, i) => {
+            const field = (callee.input as Extract<Shape, {kind: "record"}>).fields.find(f => f.name === name)!;
+            return { name, value: coerce(expression(node.arguments[i]!, scope, field.shape), field.shape, node.arguments[i]!) };
+          }),
+        } : coerce(
           expression(node.arguments[0]!, scope, callee.input),
           callee.input,
           node,
@@ -921,11 +954,14 @@ export function compileTypeScript(
       name: fn.name,
       source: node.getSourceFile().fileName,
       parameter: fn.parameter,
+      ...(parameterFields ? { parameterNames: parameterFields.map(p => p.name) } : {}),
       input: fn.input,
       output: fn.output,
       body,
       dependencies: [...dependencies],
       localName: functionIdentity(node),
+      snapshot: runtime?.context(value).snapshot.id,
+      instance: runtime?.identity(value),
       calls: [...calls.values()],
       captures: [...captures.values()],
     };
@@ -933,6 +969,7 @@ export function compileTypeScript(
     compiled.set(value, result);
     functions.push(result);
     return result;
+    } finally { program = previousProgram; checker = previousChecker; }
   };
   const target = compileFunction(targetValue as StaticFunction);
   if (
@@ -983,36 +1020,69 @@ export function compileTypeScript(
 export function importedLeanFiles(entry: string): string[] {
   const files = new Set<string>(),
     seen = new Set<string>();
-  const options: ts.CompilerOptions = {
-    module: ts.ModuleKind.ESNext,
-    moduleResolution: ts.ModuleResolutionKind.Bundler,
-  };
-  const visit = (file: string): void => {
-    file = path.resolve(file);
-    if (seen.has(file)) return;
-    seen.add(file);
-    const text = ts.sys.readFile(file);
-    if (text === undefined) return; // The compiler reports the missing module precisely.
-    for (const imported of ts.preProcessFile(text).importedFiles) {
-      const name = imported.fileName;
-      if (name.endsWith(".lean") && name.startsWith(".")) {
-        files.add(path.resolve(path.dirname(file), name));
-      } else {
-        const resolved = ts.resolveModuleName(
-          name,
-          file,
-          options,
-          ts.sys,
-        ).resolvedModule;
-        if (
-          resolved &&
-          !resolved.isExternalLibraryImport &&
-          !resolved.resolvedFileName.endsWith(".d.ts")
-        )
-          visit(resolved.resolvedFileName);
-      }
+  return withAPI((api) => {
+    const resolver = api.createModuleResolver(compilerOptions);
+    try {
+      const visit = (file: string): void => {
+        file = path.resolve(file);
+        if (seen.has(file)) return;
+        seen.add(file);
+        let text: string;
+        try {
+          text = readFileSync(file, "utf8");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+          throw error;
+        }
+        const lease = api.createSourceFile(file, text);
+        try {
+          const imports = new Set<string>();
+          const collect = (node: ts.Node): void => {
+            if (
+              (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+              node.moduleSpecifier &&
+              ts.isStringLiteral(node.moduleSpecifier)
+            )
+              imports.add(node.moduleSpecifier.text);
+            if (
+              ts.isStringLiteral(node) &&
+              (ts.isExternalModuleReference(node.parent) ||
+                (ts.isLiteralTypeNode(node.parent) &&
+                  ts.isImportTypeNode(node.parent.parent)) ||
+                (ts.isCallExpression(node.parent) &&
+                  (node.parent.expression.kind ===
+                    ts.SyntaxKind.ImportKeyword ||
+                    (ts.isIdentifier(node.parent.expression) &&
+                      node.parent.expression.text === "require"))))
+            )
+              imports.add(node.text);
+            node.forEachChild(collect);
+          };
+          collect(lease.sourceFile);
+          for (const name of imports) {
+            if (name.endsWith(".lean") && name.startsWith("."))
+              files.add(path.resolve(path.dirname(file), name));
+            else {
+              const resolved = resolver.resolveModuleName(
+                name,
+                path.dirname(file),
+              ).resolvedModule;
+              if (
+                resolved &&
+                !resolved.isExternalLibraryImport &&
+                !resolved.resolvedFileName.endsWith(".d.ts")
+              )
+                visit(resolved.resolvedFileName);
+            }
+          }
+        } finally {
+          lease.dispose();
+        }
+      };
+      visit(entry);
+      return [...files];
+    } finally {
+      resolver.dispose();
     }
-  };
-  visit(entry);
-  return [...files];
+  });
 }

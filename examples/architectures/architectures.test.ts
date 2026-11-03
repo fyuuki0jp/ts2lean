@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import "ts2lean/vitest";
+import "@fyuuki0jp/ts2lean/vitest";
 import { nonnegativeQuote } from "./Quote.lean";
 import { handle as layered } from "./layered/presentation/controller.ts";
 import { handle as clean, useCase } from "./clean/composition.ts";

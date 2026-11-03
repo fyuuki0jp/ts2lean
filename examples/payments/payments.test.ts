@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test, vi } from "vitest";
-import "ts2lean/vitest";
-import { verifySystem } from "ts2lean/runtime";
+import "@fyuuki0jp/ts2lean/vitest";
+import { verifySystem } from "@fyuuki0jp/ts2lean/runtime";
 import { ledgerInvariant, transferContract } from "./Payment.lean";
 import { transfer, retryPendingTransfers, recover } from "./service.ts";
 import { db } from "./database.ts";

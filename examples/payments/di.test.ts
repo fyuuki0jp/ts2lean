@@ -1,6 +1,6 @@
 import { expect, test, vi } from "vitest";
-import "ts2lean/vitest";
-import { verifySystem } from "ts2lean/runtime";
+import "@fyuuki0jp/ts2lean/vitest";
+import { verifySystem } from "@fyuuki0jp/ts2lean/runtime";
 import { ledgerInvariant, transferContract } from "./Payment.lean";
 import {
   payments,
@@ -28,7 +28,7 @@ test("an injected helper cannot be replaced with a mock", async () => {
   try {
     await expect(
       verifySystem({ recoverInjected }, ledgerInvariant),
-    ).rejects.toThrow(/source or dependency changed/);
+    ).rejects.toThrow(/Unregistered function dependency/);
   } finally {
     spy.mockRestore();
   }
@@ -59,7 +59,7 @@ test("injected DB getters and proxies are rejected without invoking traps", asyn
     });
     await expect(
       verifySystem({ transfer: payments.transfer }, ledgerInvariant),
-    ).rejects.toThrow(/identity mismatch/);
+    ).rejects.toThrow(/Proxy/);
     expect(reads).toBe(0);
   } finally {
     Object.defineProperty(ports, "db", descriptor);

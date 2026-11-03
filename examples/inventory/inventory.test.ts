@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import "ts2lean/vitest";
+import "@fyuuki0jp/ts2lean/vitest";
 import { canReserve, reserve } from "./composition.ts";
 import { reservationPolicy, reservation, remaining } from "./Inventory.lean";
 test("injected maximum and enabled policy satisfy the reservation contract", async () => {

@@ -1,13 +1,14 @@
+import { captureSourceSnapshot, withSourceFile } from "./native.js";
 import path from "node:path";
-import { createHash } from "node:crypto";
-import { realpath, rm } from "node:fs/promises";
-import { ts } from "@ts-morph/common";
+import { readFile, realpath, rm } from "node:fs/promises";
+import * as ts from "typescript/ast";
 import MagicString from "magic-string";
 import type { Plugin } from "vite";
 import { LeanWorkspace, packageRoot } from "./lean.js";
 import { createProject, leanSources } from "./project.js";
 import { contractTypes, contractExportName } from "./verify.js";
 import type { VerificationOptions } from "./types.js";
+import type { SourceSnapshot } from "./source-snapshot.js";
 import {
   isFunctionNode,
   functionIdentity,
@@ -35,26 +36,31 @@ export function ts2lean(
   let root = path.resolve(options.root ?? ".");
   const { root: _root, ...verificationOptions } = options;
   const leanIds = new Set<string>();
-  const instrumentationHash = createHash("sha256")
-    .update(ts2lean.toString())
-    .update(functionIdentity.toString())
-    .update(isFunctionNode.toString())
-    .digest("hex");
+  const snapshots = new Map<string, SourceSnapshot>();
+  const captureLean = async (): Promise<Record<string, string>> => {
+    const project = createProject(root, verificationOptions);
+    const files = await leanSources([root, ...project.leanPaths, path.join(packageRoot, "lean")]);
+    return Object.fromEntries(await Promise.all(files.map(async (file) => [file, await readFile(file, "utf8")])));
+  };
   return {
     name: "ts2lean",
     enforce: "pre",
     configureVitest({ defineCacheKeyGenerator }) {
-      defineCacheKeyGenerator(({ id }) =>
-        // Discovery also depends on imported Lean files and must run afresh.
-        id.endsWith(".lean")
-          ? false
-          : JSON.stringify([instrumentationHash, root, verificationOptions]),
-      );
+      // Snapshots also depend on type-only inputs and module resolution decisions.
+      defineCacheKeyGenerator(() => false);
+    },
+    resolveId(id) {
+      if (id.startsWith("ts2lean:snapshot:")) return "\0" + id;
     },
     configResolved(config) {
       root = path.resolve(config.root, options.root ?? ".");
     },
     async load(id) {
+      if (id.startsWith("\0ts2lean:snapshot:")) {
+        const snapshot = snapshots.get(id.slice(1));
+        if (!snapshot) throw new Error("Missing source snapshot");
+        return `import { defineSourceSnapshot } from "@fyuuki0jp/ts2lean/runtime"; export default defineSourceSnapshot(${JSON.stringify(snapshot)});`;
+      }
       if (!id.endsWith(".lean")) return;
       const file = await realpath(id);
       leanIds.add(id);
@@ -65,15 +71,17 @@ export function ts2lean(
         path.join(packageRoot, "lean"),
       ]))
         this.addWatchFile(dependency);
-      const ws = await LeanWorkspace.create(project);
+      const sources = await captureLean();
+      const ws = await LeanWorkspace.create(project, undefined, sources);
       try {
         const infos = await ws.discover(file);
         contractTypes(infos); // Reject ambiguous or invalid JS export names before emitting code.
         return [
-          'import { contractReference as __ts2leanContract } from "ts2lean/runtime";',
+          'import { contractReference as __ts2leanContract } from "@fyuuki0jp/ts2lean/runtime";',
+          `const __ts2leanSources = ${JSON.stringify(sources)};`,
           ...infos.map(
             (info) =>
-              `export const ${contractExportName(info)} = __ts2leanContract(${JSON.stringify(file)}, ${JSON.stringify(info.name)}, ${JSON.stringify(root)}, ${JSON.stringify(verificationOptions)}, ${JSON.stringify(info.kind ?? "pure")});`,
+              `export const ${contractExportName(info)} = __ts2leanContract(${JSON.stringify(file)}, ${JSON.stringify(info.name)}, ${JSON.stringify(root)}, ${JSON.stringify(verificationOptions)}, ${JSON.stringify(info.kind ?? "pure")}, __ts2leanSources);`,
           ),
         ].join("\n");
       } finally {
@@ -81,292 +89,245 @@ export function ts2lean(
       }
     },
     async transform(code, id) {
+      const sourceId = id.split("?")[0]!;
       if (
-        !/\.[cm]?ts$/.test(id) ||
+        !/\.[cm]?ts$/.test(sourceId) ||
         id.endsWith(".d.ts") ||
-        id.includes("/node_modules/") ||
-        /\.(test|spec)\.[cm]?ts$/.test(id)
+        id.includes("/node_modules/")
       )
         return;
-      const file = await realpath(id);
+      const file = await realpath(sourceId);
       if (file.startsWith(path.join(packageRoot, "src") + path.sep)) return;
-      const sf = ts.createSourceFile(file, code, ts.ScriptTarget.Latest, true);
-      const variables = sf.statements
-        .filter(ts.isVariableStatement)
-        .flatMap((st) =>
-          st.declarationList.declarations
-            .filter((d) => ts.isIdentifier(d.name) && d.initializer)
-            .map((d) => ({ d, st })),
-        );
-      const functions: FunctionNode[] = [],
-        methodObjects: ts.ObjectLiteralExpression[] = [];
-      const collect = (n: ts.Node): void => {
-        if (isFunctionNode(n) && n.body) functions.push(n);
-        if (
-          ts.isObjectLiteralExpression(n) &&
-          n.properties.some(ts.isMethodDeclaration)
-        )
-          methodObjects.push(n);
-        ts.forEachChild(n, collect);
-      };
-      collect(sf);
-      const visibleObjects = new Set(
-        variables.map(({ d }) => d.name.getText()),
-      );
-      const namespaces = new Set<string>();
-      for (const st of sf.statements)
-        if (ts.isImportDeclaration(st) && !st.importClause?.isTypeOnly) {
-          const bindings = st.importClause?.namedBindings;
-          if (bindings && ts.isNamedImports(bindings))
-            for (const e of bindings.elements)
-              if (!e.isTypeOnly) visibleObjects.add(e.name.text);
-          if (bindings && ts.isNamespaceImport(bindings))
-            namespaces.add(bindings.name.text);
-        }
-      const hash = createHash("sha256").update(code).digest("hex");
-      let registerName = "__ts2leanRegister";
-      while (code.includes(registerName)) registerName += "_";
-      const output = new MagicString(code);
-      output.append(
-        `\nimport { registerFunction as ${registerName}, registerObject as ${registerName}Object, registerClosure as ${registerName}Closure, registerMethods as ${registerName}Methods, registerExport as ${registerName}Export, registerModule as ${registerName}Module, dependencyReference as ${registerName}Reference } from "ts2lean/runtime";\n`,
-      );
-      const rootName = (n: ts.Expression): string | undefined =>
-        ts.isIdentifier(n)
-          ? n.text
-          : ts.isPropertyAccessExpression(n)
-            ? rootName(n.expression)
-            : undefined;
-      const boundName = (name: ts.BindingName, text: string): boolean =>
-        ts.isIdentifier(name)
-          ? name.text === text
-          : name.elements.some(
-              (e) => ts.isBindingElement(e) && boundName(e.name, text),
-            );
-      const namespaceReference = (base: ts.Identifier): boolean => {
-        if (!namespaces.has(base.text)) return false;
-        for (
-          let owner: ts.Node | undefined = base.parent;
-          owner && !ts.isSourceFile(owner);
-          owner = owner.parent
-        ) {
-          if (
-            isFunctionNode(owner) &&
-            (owner.parameters.some((p) => boundName(p.name, base.text)) ||
-              (ts.isFunctionExpression(owner) &&
-                owner.name?.text === base.text))
-          )
-            return false;
-          if (
-            ts.isCatchClause(owner) &&
-            owner.variableDeclaration &&
-            boundName(owner.variableDeclaration.name, base.text)
-          )
-            return false;
-          if (
-            ts.isBlock(owner) &&
-            owner.statements.some((st) =>
-              ts.isVariableStatement(st)
-                ? st.declarationList.declarations.some((d) =>
-                    boundName(d.name, base.text),
-                  )
-                : ts.isFunctionDeclaration(st) && st.name?.text === base.text,
-            )
-          )
-            return false;
-        }
-        return true;
-      };
-      const reference = (n: ts.Expression): string | undefined => {
-        if (ts.isIdentifier(n)) return n.text;
-        if (!ts.isPropertyAccessExpression(n)) return;
-        const keys: string[] = [];
-        let base: ts.Expression = n;
-        while (ts.isPropertyAccessExpression(base)) {
-          keys.unshift(base.name.text);
-          base = base.expression;
-        }
-        if (!ts.isIdentifier(base)) return;
-        if (namespaceReference(base)) {
-          const first = keys.shift()!;
-          const imported = `${base.text}.${first}`;
-          return keys.length
-            ? `${registerName}Reference(${imported},${JSON.stringify(keys)})`
-            : imported;
-        }
-        return `${registerName}Reference(${base.text},${JSON.stringify(keys)})`;
-      };
-      const refs = (
-        body: ts.Node,
-        owner?: FunctionNode,
-        data = false,
-      ): Map<string, string> => {
-        const out = new Map<string, string>();
-        const visit = (n: ts.Node): void => {
-          if (isFunctionNode(n)) return;
-          if (
-            ts.isCallExpression(n) ||
-            (data && (ts.isIdentifier(n) || ts.isPropertyAccessExpression(n)))
-          ) {
-            const expr = ts.isCallExpression(n)
-              ? n.expression
-              : (n as ts.Expression);
-            const root = rootName(expr),
-              r = reference(expr);
-            let local = false;
-            if (owner && root)
-              for (
-                let scope: ts.Node | undefined = n.parent;
-                scope && !ts.isSourceFile(scope);
-                scope = scope.parent
-              ) {
-                if (
-                  isFunctionNode(scope) &&
-                  scope.parameters.some((p) => boundName(p.name, root))
-                )
-                  local = true;
-                if (
-                  ts.isCatchClause(scope) &&
-                  scope.variableDeclaration &&
-                  boundName(scope.variableDeclaration.name, root)
-                )
-                  local = true;
-                if (
-                  ts.isBlock(scope) &&
-                  scope.statements.some((st) =>
-                    ts.isVariableStatement(st)
-                      ? st.declarationList.declarations.some((d) =>
-                          boundName(d.name, root),
-                        )
-                      : ts.isFunctionDeclaration(st) && st.name?.text === root,
-                  )
-                )
-                  local = true;
-                if (scope === owner) break;
-              }
-            if (root && r && !local) out.set(expr.getText(), r);
-          }
-          ts.forEachChild(n, visit);
-        };
-        visit(body);
-        return out;
-      };
-      const record = (references: Map<string, string>) =>
-        [...references]
-          .map(
-            ([key, value]) =>
-              `get [${JSON.stringify(key)}](){return ${value};}`,
-          )
-          .join(",");
-      const metadata = (fn: FunctionNode): string => {
-        const excluded = new Set<string>();
-        const bindNames = (n: ts.BindingName): void => {
-          if (ts.isIdentifier(n)) excluded.add(n.text);
-          else
-            for (const e of n.elements)
-              if (ts.isBindingElement(e)) bindNames(e.name);
-        };
-        fn.parameters.forEach((p) => bindNames(p.name));
-        const locals = (n: ts.Node): void => {
-          if (isFunctionNode(n)) return;
-          if (ts.isVariableDeclaration(n)) bindNames(n.name);
-          ts.forEachChild(n, locals);
-        };
-        locals(fn.body!);
-        const objects = new Set<string>();
-        const visit = (n: ts.Node): void => {
-          if (
-            ts.isPropertyAccessExpression(n) &&
-            ts.isIdentifier(n.expression) &&
-            visibleObjects.has(n.expression.text) &&
-            !excluded.has(n.expression.text)
-          )
-            objects.add(n.expression.text);
-          ts.forEachChild(n, visit);
-        };
-        visit(fn.body!);
-        const name = functionIdentity(fn);
-        const declaration =
-          ts.isFunctionDeclaration(fn) && ts.isSourceFile(fn.parent)
-            ? fn
-            : ts.isVariableDeclaration(fn.parent) &&
-                ts.isVariableDeclarationList(fn.parent.parent) &&
-                ts.isVariableStatement(fn.parent.parent.parent) &&
-                ts.isSourceFile(fn.parent.parent.parent.parent)
-              ? fn.parent.parent.parent
-              : undefined;
-        const exported = declaration?.modifiers?.some(
-          (m) => m.kind === ts.SyntaxKind.ExportKeyword,
-        )
-          ? declaration.modifiers.some(
-              (m) => m.kind === ts.SyntaxKind.DefaultKeyword,
-            )
-            ? "default"
-            : name
-          : undefined;
-        return `{...${JSON.stringify({ module: file, export: exported, name, hash })},callees:()=>({${record(refs(fn.body!, fn))}}),captures:()=>({${record(refs(fn.body!, fn, true))}}),objects:()=>({${[...objects].map((n) => `[${JSON.stringify(n)}]:${n}`).join(",")}})}`;
-      };
-      for (const fn of functions) {
-        if (
-          ts.isFunctionDeclaration(fn) &&
-          fn.name &&
-          ts.isSourceFile(fn.parent)
-        )
-          output.append(`${registerName}(${fn.name.text},${metadata(fn)});\n`);
-        else if (ts.isArrowFunction(fn) || ts.isFunctionExpression(fn)) {
-          output.appendLeft(fn.getStart(), `${registerName}Closure((`);
-          output.appendRight(fn.end, `),${metadata(fn)})`);
-        }
-      }
-      for (const object of methodObjects) {
-        const sources = object.properties
-          .filter(ts.isMethodDeclaration)
-          .filter((m) => ts.isIdentifier(m.name))
-          .map((m) => `${JSON.stringify(m.name.getText())}:${metadata(m)}`)
-          .join(",");
-        output.appendLeft(object.getStart(), `${registerName}Methods((`);
-        output.appendRight(object.end, `),{${sources}})`);
-      }
-      for (const { d, st } of variables) {
-        const name = d.name.getText();
-        output.append(
-          `${registerName}Object(${name},${JSON.stringify({ module: file, name, hash })});\n`,
-        );
-        if (st.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword))
-          output.append(
-            `${registerName}Export(${name},${JSON.stringify({ module: file, export: name })});\n`,
+      const snapshot = captureSourceSnapshot(file, code, await captureLean());
+      const snapshotId = `ts2lean:snapshot:${snapshot.id}`;
+      snapshots.set(snapshotId, snapshot);
+      for (const dependency of Object.keys(snapshot.files)) this.addWatchFile(dependency);
+      return withSourceFile(file, code, (sf) => {
+        const variables = sf.statements
+          .filter(ts.isVariableStatement)
+          .flatMap((st) =>
+            st.declarationList.declarations
+              .filter((d) => ts.isIdentifier(d.name) && d.initializer)
+              .map((d) => ({ d, st })),
           );
-      }
-      for (const st of sf.statements) {
-        if (
-          ts.isExportDeclaration(st) &&
-          !st.isTypeOnly &&
-          !st.moduleSpecifier &&
-          st.exportClause &&
-          ts.isNamedExports(st.exportClause)
-        ) {
-          for (const e of st.exportClause.elements)
-            if (!e.isTypeOnly) {
-              const local = e.propertyName?.text ?? e.name.text;
-              output.append(
-                `${registerName}Export(${local},${JSON.stringify({ module: file, export: e.name.text })});\n`,
+        const functions: FunctionNode[] = [],
+          methodObjects: ts.ObjectLiteralExpression[] = [];
+        const collect = (n: ts.Node): void => {
+          if (isFunctionNode(n) && n.body) functions.push(n);
+          if (
+            ts.isObjectLiteralExpression(n) &&
+            n.properties.some(ts.isMethodDeclaration)
+          )
+            methodObjects.push(n);
+          n.forEachChild(collect);
+        };
+        collect(sf);
+        const namespaces = new Set<string>();
+        for (const st of sf.statements)
+          if (
+            ts.isImportDeclaration(st) &&
+            st.importClause?.phaseModifier !== ts.SyntaxKind.TypeKeyword
+          ) {
+            const bindings = st.importClause?.namedBindings;
+            if (bindings && ts.isNamespaceImport(bindings))
+              namespaces.add(bindings.name.text);
+          }
+        let registerName = "__ts2leanRegister";
+        while (code.includes(registerName)) registerName += "_";
+        const output = new MagicString(code);
+        output.prepend(`import ${registerName}Snapshot from ${JSON.stringify(snapshotId)};\n`);
+        output.append(
+          `\nimport { registerFunction as ${registerName}, registerObject as ${registerName}Object, registerClosure as ${registerName}Closure, registerMethods as ${registerName}Methods, dependencyReference as ${registerName}Reference } from "@fyuuki0jp/ts2lean/runtime";\n`,
+        );
+        const rootName = (n: ts.Expression): string | undefined =>
+          ts.isIdentifier(n)
+            ? n.text
+            : ts.isPropertyAccessExpression(n)
+              ? rootName(n.expression)
+              : undefined;
+        const boundName = (name: ts.BindingName, text: string): boolean =>
+          ts.isIdentifier(name)
+            ? name.text === text
+            : name.elements.some(
+                (e) =>
+                  ts.isBindingElement(e) && !!e.name && boundName(e.name, text),
               );
+        const namespaceReference = (base: ts.Identifier): boolean => {
+          if (!namespaces.has(base.text)) return false;
+          for (
+            let owner: ts.Node | undefined = base.parent;
+            owner && !ts.isSourceFile(owner);
+            owner = owner.parent
+          ) {
+            if (
+              isFunctionNode(owner) &&
+              (owner.parameters.some((p) => boundName(p.name, base.text)) ||
+                (ts.isFunctionExpression(owner) &&
+                  owner.name?.text === base.text))
+            )
+              return false;
+            if (
+              ts.isCatchClause(owner) &&
+              owner.variableDeclaration &&
+              boundName(owner.variableDeclaration.name, base.text)
+            )
+              return false;
+            if (
+              ts.isBlock(owner) &&
+              owner.statements.some((st) =>
+                ts.isVariableStatement(st)
+                  ? st.declarationList.declarations.some((d) =>
+                      boundName(d.name, base.text),
+                    )
+                  : ts.isFunctionDeclaration(st) && st.name?.text === base.text,
+              )
+            )
+              return false;
+          }
+          return true;
+        };
+        const reference = (n: ts.Expression): string | undefined => {
+          if (ts.isIdentifier(n)) return n.text;
+          if (!ts.isPropertyAccessExpression(n)) return;
+          const keys: string[] = [];
+          let base: ts.Expression = n;
+          while (ts.isPropertyAccessExpression(base)) {
+            keys.unshift(base.name.text);
+            base = base.expression;
+          }
+          if (!ts.isIdentifier(base)) return;
+          if (namespaceReference(base)) {
+            const first = keys.shift()!;
+            const imported = `${base.text}.${first}`;
+            return keys.length
+              ? `${registerName}Reference(${imported},${JSON.stringify(keys)})`
+              : imported;
+          }
+          return `${registerName}Reference(${base.text},${JSON.stringify(keys)})`;
+        };
+        const refs = (
+          body: ts.Node,
+          owner?: FunctionNode,
+          data = false,
+          receiver = false,
+        ): Map<string, string> => {
+          const out = new Map<string, string>();
+          const visit = (n: ts.Node): void => {
+            if (isFunctionNode(n)) return;
+            if (
+              ts.isCallExpression(n) ||
+              (data && (ts.isIdentifier(n) || ts.isPropertyAccessExpression(n)))
+            ) {
+              if (receiver && (!ts.isCallExpression(n) || !ts.isPropertyAccessExpression(n.expression))) {
+                n.forEachChild(visit);
+                return;
+              }
+              const expr = ts.isCallExpression(n)
+                ? receiver ? (n.expression as ts.PropertyAccessExpression).expression : n.expression
+                : (n as ts.Expression);
+              const root = rootName(expr),
+                r = reference(expr);
+              let local = false;
+              if (owner && root)
+                for (
+                  let scope: ts.Node | undefined = n.parent;
+                  scope && !ts.isSourceFile(scope);
+                  scope = scope.parent
+                ) {
+                  if (
+                    isFunctionNode(scope) &&
+                    scope.parameters.some((p) => boundName(p.name, root))
+                  )
+                    local = true;
+                  if (
+                    ts.isCatchClause(scope) &&
+                    scope.variableDeclaration &&
+                    boundName(scope.variableDeclaration.name, root)
+                  )
+                    local = true;
+                  if (
+                    ts.isBlock(scope) &&
+                    scope.statements.some((st) =>
+                      ts.isVariableStatement(st)
+                        ? st.declarationList.declarations.some((d) =>
+                            boundName(d.name, root),
+                          )
+                        : ts.isFunctionDeclaration(st) &&
+                          st.name?.text === root,
+                    )
+                  )
+                    local = true;
+                  if (scope === owner) break;
+                }
+              if (root && r && !local) out.set(expr.getText(), r);
             }
+            n.forEachChild(visit);
+          };
+          visit(body);
+          return out;
+        };
+        const record = (references: Map<string, string>) =>
+          [...references]
+            .map(
+              ([key, value]) =>
+                `get [${JSON.stringify(key)}](){return ${value};}`,
+            )
+            .join(",");
+        const metadata = (fn: FunctionNode): string => {
+          const name = functionIdentity(fn);
+          return `{...${JSON.stringify({ module: file, name })},snapshot:${registerName}Snapshot,callees:()=>({${record(refs(fn.body!, fn))}}),captures:()=>({${record(refs(fn.body!, fn, true))}}),receivers:()=>({${record(refs(fn.body!, fn, false, true))}})}`;
+        };
+        for (const fn of functions) {
+          if (
+            ts.isFunctionDeclaration(fn) &&
+            fn.name &&
+            (ts.isSourceFile(fn.parent) || ts.isBlock(fn.parent))
+          )
+            if (ts.isSourceFile(fn.parent))
+              // Declarations are hoisted; register before user statements can replace them.
+              output.appendLeft(0, `${registerName}(${fn.name.text},${metadata(fn)});\n`);
+            else
+              output.appendLeft(fn.parent.getStart() + 1, `${registerName}(${fn.name.text},${metadata(fn)});\n`);
+          else if (ts.isArrowFunction(fn) || ts.isFunctionExpression(fn)) {
+            output.appendLeft(fn.getStart(), `${registerName}Closure((`);
+            // Concise nested arrows can end at the same offset. Close the inner
+            // wrapper first so each function keeps its own source identity.
+            output.prependRight(fn.end, `),${metadata(fn)})`);
+          }
         }
-      }
-      const compositionRefs = new Map<string, string>();
-      for (const { d } of variables)
-        for (const [k, v] of refs(d.initializer!)) compositionRefs.set(k, v);
-      output.append(
-        `${registerName}Module(${JSON.stringify(file)},${JSON.stringify(hash)},()=>({${record(compositionRefs)}}));\n`,
-      );
-      return {
-        code: output.toString(),
-        map: output.generateMap({
-          hires: true,
-          source: id,
-          includeContent: true,
-        }),
-      };
+        for (const object of methodObjects) {
+          // A spread/computed member can replace a method after its declaration.
+          // In that case only independently registered function values are evidence.
+          const names = object.properties.map((p) =>
+            !ts.isSpreadAssignment(p) && p.name && ts.isIdentifier(p.name) &&
+            !ts.isGetAccessorDeclaration(p) && !ts.isSetAccessorDeclaration(p)
+              ? p.name.text : undefined);
+          if (names.includes(undefined) || new Set(names).size !== names.length) continue;
+          const sources = object.properties
+            .filter(ts.isMethodDeclaration)
+            .filter((m) => ts.isIdentifier(m.name))
+            .map((m) => `${JSON.stringify(m.name.getText())}:${metadata(m)}`)
+            .join(",");
+          output.appendLeft(object.getStart(), `${registerName}Methods((`);
+          output.appendRight(object.end, `),{${sources}})`);
+        }
+        for (const { d } of variables) {
+          const name = d.name.getText();
+          // Bind module laws before later initialization code can replace methods.
+          output.prependLeft(d.initializer!.getStart(), `${registerName}Object((`);
+          output.appendRight(d.initializer!.end,
+            `),{...${JSON.stringify({ module: file, name })},snapshot:${registerName}Snapshot})`,
+          );
+        }
+        return {
+          code: output.toString(),
+          map: output.generateMap({
+            hires: true,
+            source: id,
+            includeContent: true,
+          }),
+        };
+      });
     },
     handleHotUpdate(ctx) {
       if (!ctx.file.endsWith(".lean")) return;

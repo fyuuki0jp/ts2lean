@@ -29,10 +29,10 @@ await expect(useCase.execute).toVerify(nonnegativeQuote);
 
 コンパイラはfactoryをJavaScriptとして実行せず、ASTとTypeScriptのsymbolから配線を解決します。注入先ごとに一階のLean関数へ展開し、ドメイン実装まで含めて証明します。任意の実装がinterfaceを満たすだけで契約を保証されるわけではありません。`function-di/wrong`は実行可能な型ですが、同じLean契約の証明は失敗します。
 
-Vitestの紐付けでは、実際のクロージャの生成位置、現在のポート関数、factory参照、読み込んだソースを照合します。mock、検証中の差し替え、getter、Proxyの拒否はライブラリ側の回帰テストで確認します。
+Vitestでは実際のクロージャに生成時のソースと型情報を紐付け、現在のポート関数と捕捉値から検証モデルを作ります。factory参照や現在のファイルとの一致は要求しません。未登録mock、検証中の差し替え、getter、Proxyの拒否はライブラリ側の回帰テストで確認します。
 
 ## 対応境界
 
-このexampleは同期・純粋な関数の静的DIを扱います。factory内はconstによる依存の束縛と関数／サービスの返却に限定しています。一般的なclassのconstructor injection、decorator、DIコンテナ、実行時に依存を選ぶ処理、可変ヒープ状態のcapture、任意の外部I/Oは未対応です。非同期DBポートのDIは[決済example](../payments/README.md)を参照してください。
+このexampleは同期・純粋な関数のDIを扱います。CLIでも解析できるよう、factory内はconstによる依存の束縛と関数／サービスの返却に限定しています。`toVerify`は生成済みの関数を検証するため、生成前の依存選択やfactoryの静的評価は不要です。一般的なclassのconstructor injection、decorator、検証対象の本体内での動的な依存選択、可変ヒープへの書込み、任意の外部I/Oは未対応です。非同期DBポートのDIは[決済example](../payments/README.md)を参照してください。
 
 局所変数の代入は対応しますが、オブジェクトの更新、配列、ループ、式の途中にある`x++`などは拒否します。変換器自体の形式検証ではなく、生成Leanモデルの証明とJavaScriptとの比較テストを組み合わせています。

@@ -1,4 +1,5 @@
-import { ts } from "@ts-morph/common";
+import { type Symbol as CompilerSymbol } from "typescript/sync";
+import * as ts from "typescript/ast";
 import type { Value, ValueType } from "./compiler.js";
 
 export type ExpressionIR =
@@ -19,9 +20,9 @@ export type StatementIR =
     };
 
 export interface LoweringContext {
-  symbol(node: ts.Node): ts.Symbol;
-  pure(node: ts.Expression, env: Map<ts.Symbol, Value>): Value;
-  exception(node: ts.Expression, env: Map<ts.Symbol, Value>): string;
+  symbol(node: ts.Node): CompilerSymbol;
+  pure(node: ts.Expression, env: Map<CompilerSymbol, Value>): Value;
+  exception(node: ts.Expression, env: Map<CompilerSymbol, Value>): string;
   operation(call: ts.CallExpression): string;
   truth(value: Value): string;
   fail(node: ts.Node, message: string): never;
@@ -31,7 +32,7 @@ export interface LoweringContext {
  * It is deliberately not built from the optimized successful-path list. */
 export function lowerCallback(
   body: ts.ConciseBody,
-  initial: Map<ts.Symbol, Value>,
+  initial: Map<CompilerSymbol, Value>,
   ctx: LoweringContext,
 ): StatementIR[] {
   let serial = 0;
@@ -39,7 +40,7 @@ export function lowerCallback(
     ts.isParenthesizedExpression(node) ? unwrap(node.expression) : node;
   const expression = (
     node: ts.Expression,
-    env: Map<ts.Symbol, Value>,
+    env: Map<CompilerSymbol, Value>,
   ): ExpressionIR => {
     node = unwrap(node);
     if (ts.isAwaitExpression(node)) {
@@ -71,7 +72,7 @@ export function lowerCallback(
   };
   const sequence = (
     statements: readonly ts.Statement[],
-    outer: Map<ts.Symbol, Value>,
+    outer: Map<CompilerSymbol, Value>,
   ): StatementIR[] => {
     const env = new Map(outer),
       out: StatementIR[] = [];

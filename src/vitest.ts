@@ -37,7 +37,7 @@ expect.extend({
     return {
       pass: true,
       message: () =>
-        "Lean verified the imported function against its contract.",
+        "Lean verified the supplied function instance against its contract.",
     };
   },
 });
@@ -52,8 +52,8 @@ declare module "vitest" {
       options?: VerificationOptions,
     ): Promise<void>;
     toVerify(
-      contract: T extends (input: infer I) => infer O
-        ? LeanContract<I, O>
+      contract: T extends (...args: infer A) => infer O
+        ? LeanContract<A extends [infer I] ? I : unknown, O>
         : LeanContract,
       options?: VerificationOptions,
     ): Promise<void>;

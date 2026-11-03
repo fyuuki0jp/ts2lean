@@ -8,7 +8,9 @@ import { LeanWorkspace, run } from "../dist/lean.js";
 import { compileTypeScript } from "../dist/compiler.js";
 import { emitModel, emitExpr } from "../dist/emit.js";
 import { contractTypes } from "../dist/verify.js";
-import { ts } from "@ts-morph/common";
+import { ScriptTarget } from "typescript/ast";
+import { ModuleKind } from "typescript/sync";
+import { withAPI } from "../dist/native.js";
 
 test("sample verifies; changing subtraction to addition invalidates proof", async () => {
   const source = await readFile("examples/balance/balance.ts", "utf8"),
@@ -141,12 +143,14 @@ end Spec`;
     const js = await import(
       "data:text/javascript;base64," +
         Buffer.from(
-          ts.transpileModule(source, {
-            compilerOptions: {
-              target: ts.ScriptTarget.ES2022,
-              module: ts.ModuleKind.ESNext,
-            },
-          }).outputText,
+          withAPI((api) =>
+            api.transpileModule(source, {
+              compilerOptions: {
+                target: ScriptTarget.ES2022,
+                module: ModuleKind.ESNext,
+              },
+            }),
+          ).outputText,
         ).toString("base64")
     );
     const xs = [

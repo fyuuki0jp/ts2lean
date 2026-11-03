@@ -128,4 +128,33 @@ callbackの制御構造を保持したLean実行意味論と、正常・return�
 
 `service-factory.ts`の`createPaymentService({db})`が送金・再試行・復旧のasyncメソッドを返し、`composition.ts`で実DBを注入します。非同期helperの注入も同じ仕組みです。`di.test.ts`で、同一factoryの複数instance、元の業務契約、helperのmock、DBのgetter／Proxyを検査します。
 
-注入元のconstにLean由来の名目的なDB型を必要とします。factory parameterの構造的な型だけで法則を認定しません。複数のサービスは同一の実DB handleを共有する必要があります。factoryは同期・静的な組立てに限り、返される関数はasyncにできます。証明前後にfactory・closure環境・DB・helperを照合し、`settings()`採取後にもユーザーコードを呼ばず同一性を再確認します。
+注入元のconstにLean由来の名目的なDB型を必要とします。factory parameterの構造的な型だけで法則を認定しません。複数のサービスは同一の実DB handleを共有する必要があります。生成済みのasync関数を関数インスタンスごとに解析します。証明前後に実際のclosure環境・DB・helperを照合し、`settings()`採取後にも同一性を再確認します。関数とDBの生成元には保存済みのソース・型情報・Lean法則を使うため、読み込み後のファイル更新やfactory参照の変更に影響されません。
+
+## React画面と実際のreducerの検証
+
+```sh
+npm run build
+npm run dev:payments
+```
+
+[http://127.0.0.1:5173](http://127.0.0.1:5173)でaliceとbobの間の送金を試せます。デモ用SQLiteを`.ts2lean/payments-demo/ledger.sqlite`に作り、初回だけalice=1000・bob=0で初期化します。既存DBは上書きしません。APIは127.0.0.1:3000、Viteは127.0.0.1:5173で起動します。`PAYMENTS_DB`で別のデモDB、`PORT`でAPIのポートを指定できます。Ctrl+Cで両サーバーを終了します。
+
+```sh
+npm run verify:payments-ui
+npm run typecheck:payments-ui
+npm run build:payments-ui
+```
+
+`ui/main.tsx`が`useReducer(paymentReducer, false, initialPaymentState)`に渡す**同じ関数**を、`ui/reducer.test.ts`から`ui/Reducer.lean`の契約で検証します。ブラウザー用Vite設定にはNode専用のts2leanプラグインを入れず、証明用Vitest設定にだけ入れています。通常のUI実行や配信bundleにLeanは不要です。ビルド出力は`examples/payments/ui/dist`です。静的ファイルだけではAPIは起動しません。
+
+- 初期化関数が初期条件と不変条件を満たす。
+- reducerが全状態・全actionについて定義した遷移仕様と一致する。
+- 有効な状態から、どのactionでも状態の不変条件を保つ。
+- 古い通信試行番号の成功・失敗応答は現在の状態を変更しない。
+- 再試行は送金IDに使う操作番号・金額・方向を維持する。
+
+送金の操作番号と通信試行番号を分けています。送信中の二重操作を無視し、失敗後は同じ操作番号で、通信試行番号だけ増やして再送します。失敗時は元の依頼がDBに残っている可能性があるため、入力変更と新規送金をロックします。HTTP呼び出し直前の同期ロックも入れ、Reactの描画更新前に重複イベントが来る場合に備えています。
+
+通常テストでは送信・失敗・再試行・古い応答・成功・リセットを確認し、古い成功応答を受け入れる不具合版がLean検証で失敗することも確認します。これらの検証はUIのイベント配線・HTTP層・React自身を証明するものではありません。ブラウザーでの送金成功、残高更新、0金額の拒否、残高不足、同じIDでの再試行、新規入力に戻る際の誤送信防止、モバイル表示も実動確認しています。
+
+**同じIDでの再試行は、同じページを開いている間に限ります。** ブラウザー側の未確定操作を永続化・復元する機能はありません。応答喪失後に再読み込みして同じ内容を新規送信すると、別IDの別送金になります。画面の再読み込みをまたぐ保証は今回の対象外です。口座はデモ用のalice/bob固定で、金額入力は正の整数文字列をBigIntへ変換します。

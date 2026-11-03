@@ -4,7 +4,7 @@ TypeScriptの純粋関数とトランザクションを使う送金サービス�
 
 ```ts
 import { expect, test } from "vitest";
-import "ts2lean/vitest";
+import "@fyuuki0jp/ts2lean/vitest";
 import { withdraw } from "./balance";
 import { withdraw as withdrawContract } from "./Balance.lean";
 
@@ -26,6 +26,17 @@ await expect({ transfer, retryPendingTransfers, recover })
 
 実装から各コミットを抽出し、DBの外部保証を明示的な仮定として、任意有限回の並行実行・再試行・停止・復旧に対する安全性をLeanで証明します。`npm run test:payments`で証明・実DBテスト・不具合例を確認できます。現在は台帳専用の操作プロファイルであり、任意のTypeScriptやDBアダプター自体の検証ではありません。
 
+## 別のリポジトリで使う
+
+GitHub Packagesの`@fyuuki0jp/ts2lean`をdevDependencyに追加できます。利用先の`.npmrc`へ`@fyuuki0jp:registry=https://npm.pkg.github.com`を設定し、初回だけ`read:packages`付きclassic PATでログインしてください。
+
+```sh
+npm login --scope=@fyuuki0jp --auth-type=legacy --registry=https://npm.pkg.github.com
+npm install -D @fyuuki0jp/ts2lean vitest@5.0.5 vite@8.3.5
+```
+
+`main`更新時は開発版を`next`へ、バージョンタグは正式版を`latest`へ、CI成功後に自動公開します。[導入・Lean設定・別repoのActions・リリース手順](docs/github-packages.md)に設定例をまとめています。
+
 ## 開発環境で試す
 
 Node.js 22.18以上とLean **4.35.0**を使います。Leanは[elan](https://github.com/leanprover/elan)で導入できます。`lean`がPATHにない場合は、`TS2LEAN_LEAN`に実行ファイルのパスを設定してください。開発用の`.tools/elan/bin/lean`も自動検出します。
@@ -41,11 +52,11 @@ npm test
 
 ## Vitestへの導入
 
-利用するプロジェクトで`ts2lean`、`vitest`、`vite`をインストールし、`vitest.config.ts`でプラグインを有効にします。動作確認済みのバージョンはVitest **5.0.5**、Vite **8.3.5**です。
+利用するプロジェクトで`@fyuuki0jp/ts2lean`、`vitest`、`vite`をインストールし、`vitest.config.ts`でプラグインを有効にします。動作確認済みのバージョンはVitest **5.0.5**、Vite **8.3.5**です。
 
 ```ts
 import { defineConfig } from "vitest/config";
-import { ts2lean } from "ts2lean/vite";
+import { ts2lean } from "@fyuuki0jp/ts2lean/vite";
 
 export default defineConfig({
   plugins: [ts2lean()],
@@ -59,7 +70,7 @@ npx vitest run
 
 このプラグインはNode環境のテスト用です。ViteのrootをLeanモジュールの起点にします。異なる起点が必要なら`ts2lean({ root: "./src" })`と指定できます。`lean`、`leanPaths`、`timeoutMs`、`maxHeartbeats`もプラグインのオプションとして指定できます。関数ごとの対応付けはテストに置きます。
 
-`import "ts2lean/vitest"`はmatcherを登録します。各テストに書くか、Vitestの`setupFiles`で読み込んでください。matcherは非同期なので必ず`await`します。
+`import "@fyuuki0jp/ts2lean/vitest"`はmatcherを登録します。各テストに書くか、Vitestの`setupFiles`で読み込んでください。matcherは非同期なので必ず`await`します。
 
 ```ts
 await expect(withdraw).toVerify(withdrawContract, {
@@ -70,14 +81,26 @@ await expect(withdraw).toVerify(withdrawContract, {
 
 `timeoutMs`はLeanの各プロセスの上限です。Vitestの`testTimeout`には、複数のLeanプロセスを起動する全体の時間を確保してください。証明失敗は反例の存在を意味しないため、`.not.toVerify()`は使用できません。
 
-Viteで読み込んだ関数の元ファイルとexport名をプラグインが記録します。別名importでも動作します。mock、ラッパー、`.bind()`の戻り値、ソース読み込み後に対象・依存ファイルが変更された場合は検証を拒否します。関数の`toString()`から元コードを推測しません。検証開始時と成功を返す直前に依存関数の実参照も照合し、証明中のmock化を拒否します。成功後に関数や依存を変更した場合まで保証するものではありません。検証対象のソースを変換する独自プラグインは検証対象外です。
+`toVerify`の対象は渡された関数オブジェクトです。Viteプラグインは関数の生成時に、変換前のソース・型依存・import解決結果のスナップショットと、実際の捕捉値・依存関数を読み取る処理を紐付けます。未exportのclosureやラッパーも検証でき、同じコードから作った関数でも捕捉値が違えば別のモデルになります。読み込み後にファイルを編集・削除しても、保持している関数は生成時のソースで検証します。旧版と新版の関数を一緒に渡すこともできます。
+
+依存を別の登録済み関数へ差し替えると、現在の実関数を解析します。未登録のmockや`.bind()`の戻り値は対応するモデルがないため拒否します。一般のmockへ契約を仮定として付与するAPIは未対応です。証明で利用した依存・捕捉値・DB handleを検証前後に照合し、証明中の変更を拒否します。成功後の変更まで保証するものではありません。
+
+`magic-string`の役割は、この登録コードを挿入してソースマップを維持することです。差分検出や証明は行いません。関数の`toString()`から元コードを推測せず、ファイル名は生成元ノードと型情報を特定するためにだけ利用します。検証対象のソースを変換する独自プラグインは検証対象外です。
 
 Vitestのmatcherを使わない場合は、同じプラグインで読み込んだ関数に対してランナー非依存のassertionも使えます。
 
 ```ts
-import { verifyFunction } from "ts2lean";
+import { verifyFunction } from "@fyuuki0jp/ts2lean";
 await verifyFunction(withdraw, withdrawContract);
 ```
+
+## Reactの状態遷移を検証する
+
+[決済exampleのReact画面](examples/payments/README.md#react画面と実際のreducerの検証)は、実際に`useReducer`へ渡す`paymentReducer(state, action)`をLean契約で検証します。`npm run dev:payments`で画面を起動し、`npm run verify:payments-ui`で証明を実行できます。
+
+複数の必須データ引数は、**引数名をフィールド名にしたLean入力structure**へ対応付けます。例えば`(state: State, action: Action) => State`なら、契約の入力に`state : State`と`action : Action`を定義します。内部の関数呼び出しでは宣言順に引数を対応付けます。単一引数の契約は従来どおりです。複数引数の分割代入・default・optional・rest・明示的な`this`引数は未対応です。
+
+TypeScriptの関数型から引数名は取得できないため、複数引数のmatcher型は返値型を検査し、引数名と入力型の対応は検証時のコンパイラが検査します。Reactコンポーネントは通常のTSX、検証するreducerは`.ts`に置きます。JSX・Hooks・Reactの実行全体を形式検証する機能ではありません。
 
 ## 契約と実装
 
@@ -130,7 +153,7 @@ Viteプラグインは実行時の`.lean` importを提供し、**Content Mapper�
   },
   "contentMappers": [
     {
-      "package": "ts2lean",
+      "package": "@fyuuki0jp/ts2lean",
       "extensions": [".lean"]
     }
   ],
@@ -161,7 +184,9 @@ importした関数 + importしたLean契約
   → Leanのカーネル検査・公理監査 → Vitestの成功／失敗
 ```
 
-AST解析・型検査には`@ts-morph/common` **0.28.1**に同梱されたTypeScript **5.9.2**のCompiler APIを使います。変換対象の構文もこのAPIで解析できる範囲に限ります。
+AST解析・型検査にはTypeScript **7.1.0-beta**のnative API（`typescript/sync`・`typescript/ast`）を使います。検証済みのLean型定義は仮想ファイルとして渡し、解析終了時にnativeセッションを解放します。TypeScriptは実行時依存として配布し、Viteのソース書換えに使う`magic-string`は開発依存としてプラグインへbundleします。
+
+`npm run test:package`は配布用tarballを一時ディレクトリへ本番依存だけでインストールし、CLI・native compiler・Viteの変換を確認します。
 
 生成したモデル・証明・IRはプロジェクトの`.ts2lean/run-*/`に保存します。元のコードや仕様は上書きしません。Lean検査は毎回独立した作業ディレクトリで行います。ルートの`Model.lean`、`Proof.lean`、`InspectContract.lean`は生成用の予約名です。独自Lake依存やmathlibの取得は初版の対象外です。
 
@@ -174,7 +199,7 @@ AST解析・型検査には`@ts-morph/common` **0.28.1**に同梱されたTypeSc
 | 対応       | 内容                                                                                                |
 | ---------- | --------------------------------------------------------------------------------------------------- |
 | 値         | `bigint`、`boolean`、固定フィールドのreadonlyレコード、ネストしたレコード、`kind`タグの判別可能union |
-| 関数       | 名前付き関数、arrow、function式、静的に生成したクロージャ・サービスメソッド。データ引数は必須1個 |
+| 関数       | 名前付き関数、arrow、function式、クロージャ・サービスメソッド。データ引数は必須1個以上（複数時は単純な引数名が必要） |
 | 式         | 整数リテラル、`+ - *`、大小比較、`=== !==`、`! && \|\|`、三項演算、フィールドアクセス、レコード生成 |
 | 制御       | `const`・`let`、局所代入・`+= -= *=`・単独の`++ --`、分割代入、`if/else`、ブロック、早期return |
 | モジュール | ローカル関数呼び出し、import alias、namespace import、barrel経由の再エクスポート、Leanへのtype import |
@@ -183,9 +208,9 @@ AST解析・型検査には`@ts-morph/common` **0.28.1**に同梱されたTypeSc
 
 `number`演算、除算・剰余、一般の文字列、配列、非判別union、optional、`any`、型アサーション、ヒープ・プロパティ更新、式内の代入、`var`、ループ、再帰、例外、`async/await`、クラス、実行中の動的クロージャ生成、外部ライブラリ呼び出しは未対応として停止します。オブジェクトの同一性比較、getter、spread、computed property、`__proto__: value`も拒否します。レコード型は各フィールドに`readonly`を明記してください。構造が同じLeanレコードは同じ型を共有してください。
 
-検証対象のモジュールと読み込まれる実装モジュールには、型宣言・import/export・関数・静的な依存の組立てだけを置きます。全module scopeを検査し、選択した入口から到達する関数本体を変換します。未使用の関数本体に対する保証は主張しません。
+`toVerify`では渡された関数と実際に参照する依存関数の本体を変換します。factoryや無関係なmodule初期化を静的に再実行する必要はありません。CLIのファイル指定検証は静的なcompositionを解析するため、従来どおりmodule scopeを型宣言・import/export・関数・静的な依存の組立てに限定します。未使用の関数本体に対する保証は主張しません。
 
-[アーキテクチャ別example](examples/architectures/README.md)では、レイヤード構成、クリーンアーキテクチャ、関数DI、局所変数を更新する実装を同じLean契約で検証します。`npm run test:architectures`で実行できます。DIの証明対象は具体的に注入した実装です。factory内は不変の依存の束縛と関数／サービスの返却に限定し、任意のDIコンテナ、decorator、クラスによるconstructor injection、実行時の依存選択は未対応です。bigint・booleanのliteral、const alias、factory引数、設定オブジェクトのフィールドのcaptureに対応し、実際の値を検証前後に照合します。決済のeffectプロファイルも、同期factoryが返すasync関数・サービスへのDB／非同期helperの注入に対応します。effect側の可変局所変数・scalar capture・async factoryは未対応です。
+[アーキテクチャ別example](examples/architectures/README.md)では、レイヤード構成、クリーンアーキテクチャ、関数DI、局所変数を更新する実装を同じLean契約で検証します。`npm run test:architectures`で実行できます。DIの証明対象は具体的に注入した実装です。`toVerify`は生成済みの関数を検証するため、factory自体の実行方法に依存しません。CLIの静的compositionではfactory内を不変の依存の束縛と関数／サービスの返却に限定します。decorator・クラスによるconstructor injectionは未対応です。bigint・booleanのliteral、const alias、factory引数、設定オブジェクトのフィールドのcaptureに対応し、実際の値を検証前後に照合します。決済のeffectプロファイルも、同期factoryが返すasync関数・サービスへのDB／非同期helperの注入に対応します。effect側の可変局所変数・scalar captureは未対応です。
 
 判別可能unionは`readonly kind: "tag"`を持つrecordの和で表し、Leanの非再帰・非依存なinductiveのconstructor名をタグ、名前付き引数をpayloadに対応させます。`if`・三項演算のタグ比較で変数を絞り込みます。判別フィールド名の変更（`kind`以外）、`switch`、unionの動的キャストは未対応です。[在庫予約example](examples/inventory/README.md)では設定値DI・関数DI・成功／拒否のunionを組み合わせています。
 
@@ -205,7 +230,7 @@ Vitestの`toVerify`は`verified`だけを成功として扱い、それ以外は
 
 - 証明するのは`∀ input, pre input → post input (generatedFunction input)`です。不変条件は`pre`と`post`に含めます。事前条件そのものが充足可能であることは別の性質です。
 - `sorryAx`や独自公理への依存を拒否します。Lean標準の`propext`、`Classical.choice`、`Quot.sound`だけを許可します。
-- Vitestでは元の関数／クロージャの出所とexport bindingを別々に保持し、注入先・factory参照・実装moduleのソースを検証前後に照合します。依存オブジェクトのgetter・継承プロパティ・Proxyは拒否します。検証後の依存変更まで保証するものではありません。
+- Vitestでは関数インスタンスごとに生成時のソースを保持し、モデルが利用した実依存・捕捉値を検証前後に照合します。現在のexport binding、factory参照、ディスク上のソースとの一致は条件にしません。依存オブジェクトのgetter・継承プロパティ・Proxyは拒否します。検証後の依存変更まで保証するものではありません。
 - 変換器自体の正しさは形式証明していません。変換器とツールチェーンは信頼基盤であり、回帰テストとJavaScript／Leanの評価比較で確認しています。
 - 呼び出し時の値は宣言された型を満たす必要があります。レコードは副作用のない通常のデータで、各フィールドがown propertyであり、getter・Proxy・外部からの変更を含まないことを前提とします。実行時の入力検証は提供しません。
 - 検証は関数の値の意味を扱います。メモリ枯渇、実行時間、JavaScriptの最大bigintサイズなどの資源制約はモデル化しません。
@@ -214,7 +239,7 @@ Vitestの`toVerify`は`verified`だけを成功として扱い、それ以外は
 
 ## テスト
 
-`npm test`は、Vitestでの直接importによる紐付け、mock・ラッパー・古いソースの拒否、失敗時の終了コードに加えて、整数・分岐・スコープ・関数呼び出しの意味、未対応構文の拒否、仕様の不一致、誤った実装、公理・sorryの拒否、タイムアウト、TypeScript 7.1との実接続、型更新、import除去を確認します。
+`npm test`は、Vitestでの関数インスタンスへの紐付け、未exportのclosure・ラッパー・旧ソースの検証、未登録mockの拒否、失敗時の終了コードに加えて、整数・分岐・スコープ・関数呼び出しの意味、未対応構文の拒否、仕様の不一致、誤った実装、公理・sorryの拒否、タイムアウト、TypeScript 7.1との実接続、型更新、import除去を確認します。
 
 `npm run test:differential`は再帰的に生成した式・union・非同期DIと障害をJavaScript／Leanで比較します。seed固定、ケース保存、replay、整数入力の縮小、演算子・操作順序の意図的破壊の検出を備えます。[差分テストの範囲と実行方法](docs/differential-testing.md)を参照してください。
 

@@ -1,7 +1,9 @@
 // Reproducible generated-program testing of the real TypeScript -> Lean pipeline.
 import path from "node:path";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { ts } from "@ts-morph/common";
+import { ScriptTarget } from "typescript/ast";
+import { ModuleKind } from "typescript/sync";
+import { withAPI } from "../dist/native.js";
 import { compileTypeScript } from "../dist/compiler.js";
 import { emitModel } from "../dist/emit.js";
 import { LeanWorkspace, run } from "../dist/lean.js";
@@ -49,6 +51,8 @@ function generate(index) {
   const a = BigInt((random() % 19) + 1),
     b = BigInt((random() % 17) + 1);
   const tree = integer(3);
+  if (index % 5 === 3)
+    return `function offset(left:bigint,right:bigint):bigint{return left-right;} export function run(flag:boolean,x:bigint):bigint{const input={x,flag};return offset(${tree},${a}n);}`;
   const bodies = [
     `let y=${tree}; if(input.flag){y+=${a}n;}else{y-=${b}n;} {let y=1n;y++;} y*=2n;return y;`,
     `const {x,flag}=input;const y=${tree};return flag && x<${a}n ? y+${b}n : y-${a}n;`,
@@ -112,17 +116,20 @@ async function compare(source, inputs, mutation = false, profile = "pure-int") {
   );
   const lean = await ws.exec(["Eval.lean"]);
   if (lean.code) throw Error("Lean evaluation failed: " + lean.output);
-  const js = ts.transpileModule(source, {
-    compilerOptions: {
-      target: ts.ScriptTarget.ES2022,
-      module: ts.ModuleKind.ESNext,
-    },
-  }).outputText;
+  const js = withAPI((api) =>
+    api.transpileModule(source, {
+      compilerOptions: {
+        target: ScriptTarget.ES2022,
+        module: ModuleKind.ESNext,
+      },
+    }),
+  ).outputText;
   await writeFile(
     path.join(root, "native.mjs"),
     js +
       `\nfunction decode(s,v){if(s.kind==='int')return BigInt(v);if(s.kind==='record')return Object.fromEntries(s.fields.map(f=>[f.name,decode(f.shape,v[f.name])]));if(s.kind==='union'){const t=s.variants.find(t=>t.tag===v.kind);return {kind:v.kind,...Object.fromEntries(t.fields.map(f=>[f.name,decode(f.shape,v[f.name])]))};}return v;}
-console.log(JSON.stringify(${JSON.stringify(inputs)}.map(i=>run(decode(${JSON.stringify(info.input)},i))),(_,v)=>typeof v==='bigint'?String(v):v));`,
+const parameterNames=${JSON.stringify(ir.functions.find(f => f.name === ir.target).parameterNames ?? null)};
+console.log(JSON.stringify(${JSON.stringify(inputs)}.map(i=>{const input=decode(${JSON.stringify(info.input)},i);return parameterNames?run(...parameterNames.map(name=>input[name])):run(input);}),(_,v)=>typeof v==='bigint'?String(v):v));`,
   );
   const native = await run(
     process.execPath,

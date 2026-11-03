@@ -1,4 +1,13 @@
-import { ts, getLibFiles } from "@ts-morph/common";
+import type { ObjectCompilation } from "../object-context.js";
+import { compilerOptions, withProgram } from "../native.js";
+import {
+  SymbolFlags,
+  TypeFlags,
+  type Symbol as CompilerSymbol,
+  type Program,
+  type Checker,
+} from "typescript/sync";
+import * as ts from "typescript/ast";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { Failure, type ContractInfo, type ModuleMetadata } from "../types.js";
@@ -37,7 +46,7 @@ export interface PathState {
   state: string;
   conditions: string[];
   variables: Parameter[];
-  env: Map<ts.Symbol, Value>;
+  env: Map<CompilerSymbol, Value>;
   retryOriginal?: string;
   result?: Value;
   control?: "return" | "throw";
@@ -74,11 +83,16 @@ export interface EffectFunction {
   name: string;
   export: string;
   hash: string;
+  snapshot?: string;
+  instance?: string;
+  parameters: Value["type"][];
   calls: { reference: string; target: string }[];
   objects: { reference: string; moduleId: string }[];
 }
 export interface ModuleBinding {
   reference: string;
+  instance?: string;
+  snapshot?: string;
   file: string;
   name: string;
   hash: string;
@@ -150,55 +164,29 @@ export function compileEffects(
       contractTypes(infos),
     ]),
   );
-  const options: ts.CompilerOptions = {
-    target: ts.ScriptTarget.ES2022,
-    module: ts.ModuleKind.ESNext,
-    moduleResolution: ts.ModuleResolutionKind.Bundler,
-    strict: true,
-    noEmit: true,
-    skipLibCheck: true,
-    allowImportingTsExtensions: true,
-    types: ["node"],
-  };
-  const host = ts.createCompilerHost(options),
-    read = host.readFile.bind(host),
-    exists = host.fileExists.bind(host);
-  const libDir = path.dirname(ts.getDefaultLibFilePath(options));
-  const libs = new Map(
-    getLibFiles().map((l) => [path.join(libDir, l.fileName), l.text]),
+  return withProgram(
+    entries.map((e) => path.resolve(e.file)),
+    virtual,
+    { ...compilerOptions, types: ["node"] },
+    (program, checker) =>
+      lowerEffects(entries, declarations, operation, virtual, program, checker),
   );
-  host.readFile = (f) =>
-    virtual.get(path.resolve(f)) ?? libs.get(path.resolve(f)) ?? read(f);
-  host.fileExists = (f) =>
-    virtual.has(path.resolve(f)) || libs.has(path.resolve(f)) || exists(f);
-  host.resolveModuleNames = (names, containing) =>
-    names.map((name) =>
-      name.endsWith(".lean")
-        ? virtual.has(path.resolve(path.dirname(containing), name) + ".ts")
-          ? {
-              resolvedFileName:
-                path.resolve(path.dirname(containing), name) + ".ts",
-              extension: ts.Extension.Ts,
-            }
-          : undefined
-        : ts.resolveModuleName(name, containing, options, host).resolvedModule,
-    );
-  const program = ts.createProgram(
-      entries.map((e) => path.resolve(e.file)),
-      options,
-      host,
-    ),
-    checker = program.getTypeChecker();
-  const errors = ts.getPreEmitDiagnostics(program);
-  if (errors.length)
-    throw new Failure(
-      "type-error",
-      ts.formatDiagnosticsWithColorAndContext(errors, {
-        getCurrentDirectory: () => process.cwd(),
-        getCanonicalFileName: (f) => f,
-        getNewLine: () => "\n",
-      }),
-    );
+}
+
+export function compileEffectObjects(runtime: ObjectCompilation, operation: boolean): EffectIR {
+  const first = runtime.context(runtime.roots[0]!);
+  return lowerEffects([], first.declarations, operation, new Map(), first.program, first.checker, runtime);
+}
+
+function lowerEffects(
+  entries: { file: string; name: string }[],
+  declarations: Map<string, ContractInfo[]>,
+  operation: boolean,
+  virtual: Map<string, string>,
+  program: Program,
+  checker: Checker,
+  runtime?: ObjectCompilation,
+): EffectIR {
   const ir: EffectIR = {
     roots: [],
     compositionChecks: [],
@@ -217,17 +205,17 @@ export function compileEffects(
       `${sf.fileName}:${p.line + 1}:${p.character + 1}: ${msg}`,
     );
   };
-  const symbol = (n: ts.Node): ts.Symbol => {
+  const symbol = (n: ts.Node): CompilerSymbol => {
     let s = checker.getSymbolAtLocation(n);
     if (!s) return fail(n, "Unresolved symbol");
-    if (s.flags & ts.SymbolFlags.Alias) s = checker.getAliasedSymbol(s);
+    if (s.flags & SymbolFlags.Alias) s = checker.getAliasedSymbol(s);
     return s;
   };
   const unwrap = (n: ts.Expression): ts.Expression =>
     ts.isParenthesizedExpression(n) ? unwrap(n.expression) : n;
   const lawTypes = (
     n: ts.Node,
-    seen = new Set<ts.Symbol>(),
+    seen = new Set<CompilerSymbol>(),
   ): { spec: string; info: ContractInfo }[] => {
     const s = symbol(
       ts.isTypeReferenceNode(n)
@@ -239,7 +227,8 @@ export function compileEffects(
     if (seen.has(s)) return [];
     seen.add(s);
     const found: { spec: string; info: ContractInfo }[] = [];
-    for (const d of s.declarations ?? []) {
+    for (const handle of s.declarations) {
+      const d = handle.resolve()!;
       const file = path.resolve(d.getSourceFile().fileName);
       for (const [spec, infos] of declarations)
         if (file === path.resolve(spec) + ".ts")
@@ -282,13 +271,17 @@ export function compileEffects(
   const moduleFor = (
     receiver: ts.Expression,
     env: StaticEnv,
+    owner?: StaticFunction,
   ): ModuleBinding => {
-    const resolved = statics.resolve(receiver, env);
+    const resolved = runtime ? runtime.resolve(owner!, receiver) : statics.resolve(receiver, env);
     if (resolved.kind !== "external")
       return fail(
         receiver,
         "DB module must have an explicit Lean-derived module type",
       );
+    const previous = { program, checker, declarations };
+    if (runtime) ({ program, checker, declarations } = runtime.context(resolved));
+    try {
     const d = resolved.declaration,
       s = symbol(d.name),
       id = receiver;
@@ -315,6 +308,8 @@ export function compileEffects(
     const file = d.getSourceFile().fileName;
     const binding: ModuleBinding = {
       reference: receiver.getText(),
+      instance: runtime?.identity(resolved),
+      snapshot: runtime?.context(resolved).snapshot.id,
       file,
       name: s.name,
       hash: createHash("sha256").update(d.getSourceFile().text).digest("hex"),
@@ -325,6 +320,7 @@ export function compileEffects(
     if (
       !ir.modules.some(
         (m) =>
+          m.instance === binding.instance &&
           m.file === file &&
           m.name === binding.name &&
           m.reference === receiver.getText(),
@@ -332,6 +328,7 @@ export function compileEffects(
     )
       ir.modules.push(binding);
     return binding;
+    } finally { ({ program, checker, declarations } = previous); }
   };
   let fresh = 0;
   const variable = (type: Parameter["type"], parameters: Parameter[]) => {
@@ -350,7 +347,7 @@ export function compileEffects(
         !v &&
         n.text === "undefined" &&
         !sym.valueDeclaration &&
-        checker.getTypeAtLocation(n).flags & ts.TypeFlags.Undefined
+        checker.getTypeAtLocation(n).flags & TypeFlags.Undefined
       )
         return { type: "void", lean: "()" };
       if (!v) return fail(n, "Unbound or mutable captured value");
@@ -409,7 +406,8 @@ export function compileEffects(
         else if (ts.isShorthandPropertyAssignment(prop)) {
           const s = checker.getShorthandAssignmentValueSymbol(prop),
             v = s && p.env.get(s);
-          if (!v) return fail(prop, "Unknown shorthand");
+          if (!v || !ts.isIdentifier(prop.name))
+            return fail(prop, "Unknown shorthand");
           fields.set(prop.name.text, v);
         } else return fail(prop, "Unsupported record element");
       }
@@ -526,10 +524,10 @@ export function compileEffects(
         (n.arguments?.length ?? 0) > 1
       )
         return fail(n, "Only the standard Error constructor is supported here");
-      const declaration = symbol(n.expression).declarations?.[0];
+      const declaration = symbol(n.expression).declarations[0]?.resolve();
       if (
         !declaration ||
-        !libs.has(path.resolve(declaration.getSourceFile().fileName))
+        !program.isSourceFileDefaultLibrary(declaration.getSourceFile())
       )
         return fail(n, "Shadowed Error constructors are unsupported");
       const message = n.arguments?.[0]
@@ -628,6 +626,9 @@ export function compileEffects(
     const prior = analyzed.get(specialization);
     if (prior) return prior;
     active.add(specialization);
+    const previousContext = { program, checker, declarations };
+    if (runtime) ({ program, checker, declarations } = runtime.context(specialization));
+    try {
     const fn = specialization.node,
       file = fn.getSourceFile().fileName;
     statics.validateFunction(fn);
@@ -641,11 +642,14 @@ export function compileEffects(
       hash: createHash("sha256").update(fn.getSourceFile().text).digest("hex"),
       calls: [],
       objects: [],
+      parameters: [],
+      snapshot: runtime?.context(specialization).snapshot.id,
+      instance: runtime?.identity(specialization),
     };
     ir.functions.push(meta);
     analyzed.set(specialization, meta);
     const captures: Parameter[] = [],
-      env = new Map<ts.Symbol, Value>();
+      env = new Map<CompilerSymbol, Value>();
     for (const param of fn.parameters) {
       if (
         !ts.isIdentifier(param.name) ||
@@ -661,14 +665,12 @@ export function compileEffects(
           properties.length !== 4 ||
           !["operationId", "from", "to", "amount"].every((name) => {
             const property = properties.find((p) => p.name === name);
-            if (!property || property.flags & ts.SymbolFlags.Optional)
+            if (!property || property.flags & SymbolFlags.Optional)
               return false;
             const t = checker.getTypeOfSymbolAtLocation(property, param);
             return !!(
               t.flags &
-              (name === "amount"
-                ? ts.TypeFlags.BigIntLike
-                : ts.TypeFlags.StringLike)
+              (name === "amount" ? TypeFlags.BigIntLike : TypeFlags.StringLike)
             );
           })
         )
@@ -678,9 +680,9 @@ export function compileEffects(
           );
       }
       const scalar =
-        type.flags & ts.TypeFlags.StringLike
+        type.flags & TypeFlags.StringLike
           ? "String"
-          : type.flags & ts.TypeFlags.BigIntLike
+          : type.flags & TypeFlags.BigIntLike
             ? "Int"
             : undefined;
       if (!request && !scalar)
@@ -689,6 +691,7 @@ export function compileEffects(
           "Effect profile accepts request, string and bigint parameters",
         );
       const name = variable(scalar ?? "Request", captures);
+      meta.parameters.push(request ? "request" : scalar === "Int" ? "int" : "string");
       env.set(symbol(param.name), {
         type: request ? "request" : scalar === "Int" ? "int" : "string",
         lean: name,
@@ -716,7 +719,7 @@ export function compileEffects(
       )!.methods;
     const callInfo = (
       call: ts.CallExpression,
-      tx?: { symbol: ts.Symbol; binding: ModuleBinding },
+      tx?: { symbol: CompilerSymbol; binding: ModuleBinding },
     ) => {
       if (!ts.isPropertyAccessExpression(call.expression)) return undefined;
       const receiver = call.expression.expression,
@@ -732,15 +735,23 @@ export function compileEffects(
           inside: true,
         };
       }
-      const resolved = statics.resolve(receiver, specialization.env);
+      const resolved = runtime ? runtime.resolve(specialization, receiver) : statics.resolve(receiver, specialization.env);
       if (resolved.kind !== "external") return undefined;
-      const binding = moduleFor(receiver, specialization.env),
+      if (runtime) {
+        const callerContext = { program, checker, declarations };
+        ({ program, checker, declarations } = runtime.context(resolved));
+        let hasLaw: boolean;
+        try { hasLaw = declarationLaw(resolved.declaration).length > 0; }
+        finally { ({ program, checker, declarations } = callerContext); }
+        if (!hasLaw) return undefined;
+      }
+      const binding = moduleFor(receiver, specialization.env, specialization),
         method = methods(binding, "database").find(
           (m) => m.name === methodName,
         );
       if (!method) return fail(call, "Unknown module operation");
       const reference = receiver.getText(),
-        moduleId = `${binding.file}#${binding.name}`;
+        moduleId = binding.instance ?? `${binding.file}#${binding.name}`;
       if (!meta.objects.some((o) => o.reference === reference))
         meta.objects.push({ reference, moduleId });
       return { operation: method.operation, binding, inside: false };
@@ -748,7 +759,7 @@ export function compileEffects(
     const evalEffect = (
       n: ts.Expression,
       p: PathState,
-      tx?: { symbol: ts.Symbol; binding: ModuleBinding },
+      tx?: { symbol: CompilerSymbol; binding: ModuleBinding },
     ): { p: PathState; value: Value }[] => {
       n = unwrap(n);
       const awaited = ts.isAwaitExpression(n);
@@ -777,16 +788,20 @@ export function compileEffects(
             "Helpers in callbacks must be inlined by the compiler (not yet supported)",
           );
         const callee = asFunction(
-          statics.resolve(n.expression, specialization.env),
+          runtime ? runtime.resolve(specialization, n.expression) : statics.resolve(n.expression, specialization.env),
           n,
         );
         const target = analyze(callee, n);
+        if (n.arguments.length !== target.parameters.length)
+          return fail(n, "Actual helper parameter count differs from the call");
         meta.calls.push({
           reference: n.expression.getText(),
           target: target.id,
         });
-        for (const arg of n.arguments) {
+        for (const [index, arg] of n.arguments.entries()) {
           const v = value(arg, p);
+          if (v.type !== target.parameters[index])
+            return fail(arg, "Actual helper parameter type differs from the call");
           const original = p.retryOriginal ?? v.origin;
           if (original && v.type === "request") {
             const sf = n.getSourceFile();
@@ -800,15 +815,16 @@ export function compileEffects(
             });
           }
         }
-        const sig = checker.getSignatureFromDeclaration(callee.node);
+        const calleeChecker = runtime?.context(callee).checker ?? checker;
+        const sig = calleeChecker.getSignatureFromDeclaration(callee.node);
         const ret =
-          sig && checker.getAwaitedType(checker.getReturnTypeOfSignature(sig));
+          sig && calleeChecker.getAwaitedType(calleeChecker.getReturnTypeOfSignature(sig));
         return [
           {
             p,
             value: {
               type:
-                ret?.flags && ret.flags & ts.TypeFlags.Void ? "void" : "helper",
+                ret?.flags && ret.flags & TypeFlags.Void ? "void" : "helper",
               lean: "()",
             },
           },
@@ -1023,7 +1039,7 @@ export function compileEffects(
     const sequence = (
       statements: readonly ts.Statement[],
       paths: PathState[],
-      tx?: { symbol: ts.Symbol; binding: ModuleBinding },
+      tx?: { symbol: CompilerSymbol; binding: ModuleBinding },
     ): PathState[] => {
       for (const st of statements) {
         paths = paths.flatMap((p) => {
@@ -1208,10 +1224,24 @@ export function compileEffects(
       }
     active.delete(specialization);
     return meta;
+    } finally { ({ program, checker, declarations } = previousContext); }
   };
-  for (const entry of entries) {
-    const sf = program.getSourceFile(path.resolve(entry.file));
-    if (!sf) return fail(program.getSourceFiles()[0]!, "Missing entrypoint");
+  for (const [index, entry] of (runtime ? runtime.roots.map((r) => ({ file: r.node.getSourceFile().fileName, name: functionIdentity(r.node) })) : entries).entries()) {
+    let specialization: StaticFunction;
+    let sf: ts.SourceFile;
+    if (runtime) {
+      specialization = runtime.roots[index]!;
+      ({ program, checker, declarations } = runtime.context(specialization));
+      sf = specialization.node.getSourceFile();
+    } else {
+    sf = program.getSourceFile(path.resolve(entry.file))!;
+    if (!sf)
+      return fail(
+        program
+          .getSourceFileNames()
+          .map((file) => program.getSourceFile(file)!)[0]!,
+        "Missing entrypoint",
+      );
     const ms = checker.getSymbolAtLocation(sf);
     const [exportName, ...members] = entry.name.split(".");
     const s =
@@ -1219,7 +1249,8 @@ export function compileEffects(
     if (!s) return fail(sf, `Missing export ${entry.name}`);
     let target = statics.resolveSymbol(s, sf, new Map());
     for (const member of members) target = statics.member(target, member, sf);
-    const specialization = asFunction(target, sf);
+    specialization = asFunction(target, sf);
+    }
     if (operation) {
       const fn = specialization.node;
       const sig = checker.getSignatureFromDeclaration(fn);
@@ -1237,7 +1268,7 @@ export function compileEffects(
     }
     ir.roots.push(analyze(specialization, sf).id);
   }
-  if (new Set(ir.modules.map((m) => m.file + "#" + m.name)).size > 1)
+  if (new Set(ir.modules.map((m) => m.instance ?? m.file + "#" + m.name)).size > 1)
     throw new Failure(
       "unsupported",
       "This effects profile supports one shared database handle",
@@ -1245,7 +1276,8 @@ export function compileEffects(
   ir.compositionChecks = statics.checks;
   ir.sourceHashes = Object.fromEntries(
     program
-      .getSourceFiles()
+      .getSourceFileNames()
+      .map((file) => program.getSourceFile(file)!)
       .filter(
         (sf) =>
           !sf.isDeclarationFile &&
