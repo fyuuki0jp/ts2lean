@@ -5,6 +5,19 @@ export const leanName = (name) =>
     .map((n) => `«${n}»`)
     .join(".");
 export function encodeInput(shape, value) {
+  if(shape.kind==="safeinteger") {
+    if(typeof value!=="number"||!Number.isSafeInteger(value))throw Error("Outside safe-integer number domain");
+    return `({value := ${String(value)}, negativeZero := ${Object.is(value,-0)}} : Ts2Lean.SafeInteger)`;
+  }
+  if(shape.kind==="snapshot") {
+    if(!value||!Number.isSafeInteger(value.identity)||value.identity<0)throw Error("Invalid snapshot identity");
+    return `({identity := ${value.identity}, json := ${encodeInput({kind:"optional",element:{kind:"jsstring"}},value.json)}} : Ts2Lean.Snapshot)`;
+  }
+  if(shape.kind==="optional")return value===undefined?`(none : Option ${observationType(shape.element)})`:`(some ${encodeInput(shape.element,value)})`;
+  if(shape.kind==="array") {
+    if(!Array.isArray(value)||Object.keys(value).length!==value.length)throw Error("Expected a dense array");
+    return `([${value.map(v=>encodeInput(shape.element,v)).join(",")}] : List ${observationType(shape.element)})`;
+  }
   if (shape.kind === "jsstring") {
     if (typeof value !== "string") throw Error("Invalid string");
     return `({units := [${Array.from({length:value.length}, (_, i) => value.charCodeAt(i)).join(",") }]} : Ts2Lean.JSString)`;
@@ -37,6 +50,10 @@ export function encodeInput(shape, value) {
   return `({${shape.fields.map((f) => `${leanName(f.name)} := ${encodeInput(f.shape, value[f.name])}`).join(",")}}:${leanName(shape.lean)})`;
 }
 export function leanObservation(shape, expr, depth = 0) {
+  if(shape.kind==="safeinteger")return `(Lean.Json.arr #[Lean.toJson (toString ((${expr}).value)), Lean.toJson ((${expr}).negativeZero)])`;
+  if(shape.kind==="snapshot")return `(Lean.Json.mkObj [("identity",Lean.toJson ((${expr}).identity)),("json",${leanObservation({kind:"optional",element:{kind:"jsstring"}},`(${expr}).json`,depth+1)})])`;
+  if(shape.kind==="optional")return `(match ${expr} with | none => Lean.Json.null | some o${depth} => ${leanObservation(shape.element,`o${depth}`,depth+1)})`;
+  if(shape.kind==="array")return `(Lean.Json.arr ((${expr}).map (fun o${depth} => ${leanObservation(shape.element,`o${depth}`,depth+1)})).toArray)`;
   if (shape.kind === "jsstring") return `(Lean.toJson ((${expr}).units.map UInt16.toNat))`;
   if (shape.kind === "int") return `(Lean.toJson (toString (${expr})))`;
   if (shape.kind === "bool" || shape.kind === "literal")
@@ -51,6 +68,11 @@ export function leanObservation(shape, expr, depth = 0) {
   if (shape.kind === "record")
     return `(Lean.Json.mkObj [${shape.fields.map((f) => `(${JSON.stringify(f.name)},${leanObservation(f.shape, `(${expr}).${leanName(f.name)}`, depth + 1)})`).join(",")}])`;
   throw Error("Unsupported observation shape");
+}
+function observationType(shape) {
+  if(shape.kind==="array")return `(List ${observationType(shape.element)})`;
+  if(shape.kind==="optional")return `(Option ${observationType(shape.element)})`;
+  return ({int:"Int",bool:"Bool",jsstring:"Ts2Lean.JSString",safeinteger:"Ts2Lean.SafeInteger",snapshot:"Ts2Lean.Snapshot",unit:"Unit"})[shape.kind]??leanName(shape.lean);
 }
 // Canonical JSON compares objects independent of serializer key order.
 export const canonical = (value) =>

@@ -117,3 +117,66 @@ test("Vite capture registration distinguishes property names from variable reads
   assert.match(emitted.code, /function\* take/);
   assert.match(emitted.code, /steps.return\(undefined\)/);
 });
+
+test("intermediate Results preserve all tagged payloads through recursive widening", async () => {
+  const source=`type Small={readonly kind:"denied";readonly code:bigint}|{readonly kind:"missing";readonly key:string};
+    type Wide=Small|{readonly kind:"busy"};
+    type Result<T,E>={readonly ok:true;readonly value:T}|{readonly ok:false;readonly error:E};
+    type Input={readonly success:boolean;readonly missing:boolean;readonly code:bigint;readonly key:string};
+    function policy(i:Input):Result<boolean,Small>{
+      if(i.success)return {ok:true,value:true};
+      if(i.missing)return {ok:false,error:{kind:"missing",key:i.key}};
+      return {ok:false,error:{kind:"denied",code:i.code}};
+    }
+    function widen(r:Result<boolean,Small>):Result<boolean,Wide>{return r;}
+    export function run(i:Input):Result<{readonly count:bigint},Wide>{
+      const r=widen(policy(i)); if(!r.ok)return r;
+      return {ok:true,value:{count:1n}};
+    }`;
+  const spec=`import Ts2Lean.Contract
+namespace Spec
+structure Input where
+  success : Bool
+  missing : Bool
+  code : Int
+  key : Ts2Lean.JSString
+inductive Problem where
+  | denied (code : Int)
+  | missing (key : Ts2Lean.JSString)
+  | busy
+structure Value where
+  count : Int
+inductive Reply where
+  | ok (value : Value)
+  | err (error : Problem)
+#ts2lean_bool_union Reply "ok" Reply.ok Reply.err
+def contract : Ts2Lean.Contract Input Reply where
+  pre := fun _ => True
+  post := fun i o => if i.success then o = .ok ⟨1⟩ else
+    if i.missing then o = .err (.missing i.key) else o = .err (.denied i.code)
+end Spec`;
+  const f=await fixture(source,spec);
+  try {
+    const [good]=await processBindings(f.config,"verify");
+    assert.equal(good.status,"verified",good.message);
+    const model=await readFile(path.join(path.dirname(good.artifact),"Model.lean"),"utf8");
+    assert.match(model,/inductive «Union/);
+    const ws=await LeanWorkspace.create(f.config);
+    const info=await ws.inspect("Spec.lean","Spec.contract");
+    await writeFile(path.join(ws.dir,"Model.lean"),model);
+    await ws.compile("Model.lean");
+    const ir=JSON.parse(await readFile(path.join(path.dirname(good.artifact),"ir.json"),"utf8"));
+    const inputs=[true,false].flatMap(success=>[true,false].flatMap(missing=>[-7n,0n,999n].map(code=>({success,missing,code,key:"key\\ud800"}))));
+    const actual=await import(pathToFileURL(path.join(f.dir,"main.ts")).href);
+    await writeFile(path.join(ws.dir,"Eval.lean"),"import Model\n"+inputs.map(i=>
+      `#eval IO.println (${leanObservation(info.output,`Ts2LeanGenerated.${ir.target} ${encodeInput(info.input,{...i,code:String(i.code)})}`)}).compress`).join("\n"));
+    const evaluated=await ws.exec(["Eval.lean"]);
+    assert.equal(evaluated.code,0,evaluated.output);
+    const expected=inputs.map(i=>actual.run(i)).map(r=>r.ok?{ok:true,value:{count:String(r.value.count)}}:
+      {ok:false,error:r.error.kind==="missing"?{kind:"missing",key:Array.from({length:r.error.key.length},(_,i)=>r.error.key.charCodeAt(i))}:{kind:"denied",code:String(r.error.code)}});
+    assert.deepEqual(evaluated.output.trim().split("\n").map(JSON.parse),expected);
+    await writeFile(path.join(f.dir,"main.ts"),source.replace('function widen(r:Result<boolean,Small>):Result<boolean,Wide>{return r;}','function widen(r:Result<boolean,Small>):Result<boolean,Wide>{return {ok:false,error:{kind:"busy"}};}'));
+    const [bad]=await processBindings(f.config,"verify");
+    assert.equal(bad.status,"unproved",bad.message);
+  } finally {await f.cleanup();}
+});

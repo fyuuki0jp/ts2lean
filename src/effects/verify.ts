@@ -33,7 +33,7 @@ export async function verifyEffects(
     const declarations = new Map<string, ContractInfo[]>();
     const specs = new Set([
       path.resolve(contract.spec),
-      ...entries.flatMap((e) => importedLeanFiles(e.file)),
+      ...entries.flatMap((e) => importedLeanFiles(e.file, config)),
     ]);
     for (const spec of specs) declarations.set(spec, await ws.discover(spec));
     const target = declarations
@@ -47,7 +47,7 @@ export async function verifyEffects(
     const prepared = graph ? await graph.prepare(config) : undefined;
     const ir = graph
       ? graph.compile(prepared!, (session) => compileEffectObjects(session, target.kind === "operation"))
-      : compileEffects(entries, declarations, target.kind === "operation");
+      : compileEffects(entries, declarations, target.kind === "operation", config);
     if (!ir.transactions.length)
       throw new Failure(
         "unsupported",

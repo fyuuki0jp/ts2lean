@@ -30,7 +30,7 @@ await verifyUseCases([{ fn: service.save, contract: saveContract }], {
 
 [状態機械](examples/state-machine/README.md)は実reducerの初期状態・1-step保存を任意有限の操作列へ接続します。[汎用ポート](examples/ports/README.md)は明示したadapter法則の下で、本番async関数の返値・例外・状態・呼出しトレースと、複数entryの任意有限の直列呼出しを検証します。認可省略・commit前成功応答・順序変更・重複実行を拒否するサンプルを含みます。並行interleavingやpending await途中のクラッシュの保証は含みません。
 
-通常の`string`はLeanの`Ts2Lean.JSString`へ対応し、UTF-16 code unit列の等値比較を検証できます。nullable/optional、配列、IEEE754 numberは未対応です。
+通常の`string`はLeanの`Ts2Lean.JSString`へ対応し、UTF-16 code unit列の等値比較を検証できます。readonly配列・`T | undefined`・safe-integerの`number`は明示的なsnapshot領域で扱えます。nullable、optional property、IEEE754全体は未対応です。
 
 matcherの呼び出しを変えずに結果を集めるには、プラグインに`report: { directory: ".ts2lean/reports", runId: "audit-20261103-unique" }`を指定します。runIdにはASCII英数字から始まる英数字・`.`・`_`・`-`を使います。成功・未証明を含むResult、実ソースの範囲とhash、具体化モデルのhash・capture、契約とadapter仮定をJSONに保存します。[保証範囲と監査への接続](docs/semantics.md#検証レポートとカバー率への接続)。
 
@@ -221,11 +221,19 @@ AST解析・型検査にはTypeScript **7.1.0-beta**のnative API（`typescript/
 
 Leanでは具体型ごとに帰納型を定義し、`#ts2lean_bool_union Validation "ok" Validation.ok Validation.err`でTSの表現を明示します。[実行できる最小例と型の対応](examples/result/README.md)を参照してください。`npm run verify:result`で実関数を証明し、`npm run typecheck:result`でContent Mapperの型互換性を確認できます。高階callbackの`map`／`andThen`とgeneratorによる`sequence`は未対応です。
 
+## 不変snapshotと履歴
+
+`createHistory<T>`／`transitionHistory<T>`のようなgenericな実関数を、明示したsnapshot領域で検証できます。配列のspread・slice・at・添字・length、`JSON.stringify`による観測比較、制限したsafe-integerの`number`に対応します。[履歴example](examples/history/README.md)では内容・順序の保存と、固定上限50／80での任意有限列の不変条件を扱います。
+
+契約に`#ts2lean_snapshot_profile`を付け、通常の不変dense配列、標準組込み、非throwで純粋なserializerという前提を明示します。添字範囲と配列長は別途証明します。IEEE754全体や任意のmutable generic payloadの検証ではありません。[領域と証明義務](docs/semantics.md)を参照してください。
+
+プロジェクトのaliasは`ts2lean({ tsconfig: "tsconfig.proof.json" })`で指定できます。省略時はroot直下の`tsconfig.json`を使用します。`extends`／`paths`の解決結果と実効設定は関数のsnapshotに固定します。Viteの実行時alias設定も同じ参照先に合わせてください。
+
 ## 純粋関数の対応範囲
 
 | 対応       | 内容                                                                                                |
 | ---------- | --------------------------------------------------------------------------------------------------- |
-| 値         | `bigint`、`boolean`、固定フィールドのreadonlyレコード、ネストしたレコード、`kind`文字列タグ・明示登録したbooleanタグの判別可能union |
+| 値         | `bigint`、`boolean`、UTF-16の`string`、固定フィールドのreadonlyレコード、ネストしたレコード、`kind`文字列タグ・明示登録したbooleanタグの判別可能union |
 | 関数       | 名前付き関数、arrow、function式、クロージャ・サービスメソッド。データ引数は必須1個以上（複数時は単純な引数名が必要） |
 | 式         | 整数リテラル、`+ - *`、大小比較、`=== !==`、`! && \|\|`、三項演算、フィールドアクセス、レコード生成 |
 | 制御       | `const`・`let`、局所代入・`+= -= *=`・単独の`++ --`、分割代入、`if/else`、ブロック、早期return |
@@ -233,7 +241,7 @@ Leanでは具体型ごとに帰納型を定義し、`#ts2lean_bool_union Validat
 | DI         | module scopeのcomposition、関数ポート・オブジェクトポート、factoryが返す関数やサービス、`satisfies` |
 | Lean型     | `Int`、`Bool`、型引数・継承・依存フィールドのないstructure、非再帰のinductive union                                          |
 
-`number`演算、除算・剰余、一般の文字列、配列、非判別union、optional、`any`、型アサーション、ヒープ・プロパティ更新、式内の代入、`var`、ループ、再帰、例外、`async/await`、クラス、実行中の動的クロージャ生成、外部ライブラリ呼び出しは未対応として停止します。オブジェクトの同一性比較、getter、spread、computed property、`__proto__: value`も拒否します。レコード型は各フィールドに`readonly`を明記してください。構造が同じLeanレコードは同じ型を共有してください。
+snapshot領域外の`number`・配列・`T | undefined`、number演算、除算・剰余、文字列操作、非判別union、optional property、`any`、型アサーション、ヒープ・プロパティ更新、式内の代入、`var`、ループ、再帰、例外、`async/await`、クラス、実行中の動的クロージャ生成、外部ライブラリ呼び出しは未対応として停止します。オブジェクトの同一性比較、getter、レコードのspread、computed property、`__proto__: value`も拒否します。レコード型は各フィールドに`readonly`を明記してください。構造が同じLeanレコードは同じ型を共有してください。
 
 `toVerify`では渡された関数と実際に参照する依存関数の本体を変換します。factoryや無関係なmodule初期化を静的に再実行する必要はありません。CLIのファイル指定検証は静的なcompositionを解析するため、従来どおりmodule scopeを型宣言・import/export・関数・静的な依存の組立てに限定します。未使用の関数本体に対する保証は主張しません。
 
@@ -255,14 +263,14 @@ Leanでは具体型ごとに帰納型を定義し、`#ts2lean_bool_union Validat
 
 Vitestの`toVerify`は`verified`だけを成功として扱い、それ以外はテストを失敗させます。既存CLIも、いずれかの対象が成功しなければ非ゼロで終了します。JSONは`{ "results": [...] }`形式です。各結果には`status`、`message`、対象の`module`と`export`、生成済みなら`artifact`が入り、成功した証明には`axioms`も入ります。
 
-- 証明するのは`∀ input, pre input → post input (generatedFunction input)`です。不変条件は`pre`と`post`に含めます。事前条件そのものが充足可能であることは別の性質です。
+- 基本領域で証明するのは`∀ input, pre input → post input (generatedFunction input)`です。snapshot領域では入力domainを前提とし、出力domainと評価安全性も証明します。不変条件は`pre`と`post`に含めます。事前条件そのものが充足可能であることは別の性質です。
 - `sorryAx`や独自公理への依存を拒否します。Lean標準の`propext`、`Classical.choice`、`Quot.sound`だけを許可します。
 - Vitestでは関数インスタンスごとに生成時のソースを保持し、モデルが利用した実依存・捕捉値を検証前後に照合します。現在のexport binding、factory参照、ディスク上のソースとの一致は条件にしません。依存オブジェクトのgetter・継承プロパティ・Proxyは拒否します。検証後の依存変更まで保証するものではありません。
 - 変換器自体の正しさは形式証明していません。変換器とツールチェーンは信頼基盤であり、回帰テストとJavaScript／Leanの評価比較で確認しています。
 - 呼び出し時の値は宣言された型を満たす必要があります。レコードは副作用のない通常のデータで、各フィールドがown propertyであり、getter・Proxy・外部からの変更を含まないことを前提とします。実行時の入力検証は提供しません。
 - 検証は関数の値の意味を扱います。メモリ枯渇、実行時間、JavaScriptの最大bigintサイズなどの資源制約はモデル化しません。
 - Lean仕様とTypeScript設定はローカルコードとして実行されます。悪意ある仕様を隔離するサンドボックスではありません。
-- DBを使う操作は、別の`ledger-v1` effect検証経路で扱います。汎用I/O・任意の外部操作意味論は未対応です。[決済基盤のサンプル](examples/payments/README.md)に対応範囲と外部仮定を記載しています。
+- DBを使う操作は、別の`ledger-v1` effect検証経路で扱います。任意の明示的なポート遷移は汎用ポートAPIで扱います。[決済基盤のサンプル](examples/payments/README.md)に対応範囲と外部仮定を記載しています。
 
 ## テスト
 

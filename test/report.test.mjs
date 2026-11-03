@@ -5,6 +5,11 @@ import path from "node:path";
 import {tmpdir} from "node:os";
 import {reportVerification} from "../dist/report.js";
 import {Failure} from "../dist/types.js";
+import {verifyFunction} from "../dist/runtime.js";
+
+test("report setup preserves the invalid-contract diagnostic", async () => {
+  await assert.rejects(verifyFunction(x=>x,{}), /Import the Lean contract/);
+});
 
 test("reports are run-scoped complete results and a final reference failure cannot publish verified",async()=>{
   const directory=await mkdtemp(path.join(tmpdir(),"ts2lean-report-"));

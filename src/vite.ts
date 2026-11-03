@@ -98,7 +98,7 @@ export function ts2lean(
         return;
       const file = await realpath(sourceId);
       if (file.startsWith(path.join(packageRoot, "src") + path.sep)) return;
-      const snapshot = captureSourceSnapshot(file, code, await captureLean());
+      const snapshot = captureSourceSnapshot(file, code, await captureLean(), {root, tsconfig: options.tsconfig});
       const snapshotId = `ts2lean:snapshot:${snapshot.id}`;
       snapshots.set(snapshotId, snapshot);
       for (const dependency of Object.keys(snapshot.files)) this.addWatchFile(dependency);

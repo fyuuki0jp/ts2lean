@@ -1,7 +1,11 @@
+import type { RawCompilerOptions } from "typescript/sync";
+
 /** Immutable compilation inputs attached to a loaded module instance. */
 export interface SourceSnapshot {
   readonly id: string;
   readonly root: string;
+  readonly compilerOptions?: RawCompilerOptions;
+  readonly tsconfig?: string;
   readonly files: Readonly<Record<string, string>>;
   readonly roots: readonly string[];
   readonly resolutions: readonly {

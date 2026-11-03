@@ -1,6 +1,6 @@
 {
   "name": "@fyuuki0jp/ts2lean",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Verify TypeScript functions, reducers and async use-cases against Lean 4 contracts",
   "type": "module",
   "bin": {
@@ -63,7 +63,9 @@
     "verify:state-machine": "vitest run --config examples/state-machine/vitest.config.ts",
     "typecheck:state-machine": "tsc -p examples/state-machine/tsconfig.json --runExternalCode",
     "verify:ports": "vitest run --config examples/ports/vitest.config.ts",
-    "typecheck:ports": "tsc -p examples/ports/tsconfig.json --runExternalCode"
+    "typecheck:ports": "tsc -p examples/ports/tsconfig.json --runExternalCode",
+    "verify:history": "vitest run --config examples/history/vitest.config.ts",
+    "typecheck:history": "tsc -p examples/history/tsconfig.json --runExternalCode"
   },
   "typescript": {
     "contentMapper": {

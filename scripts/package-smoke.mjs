@@ -134,7 +134,7 @@ export default defineConfig({plugins:[ts2lean()],test:{testTimeout:90000}});
 `);
   await writeFile(path.join(dir, "tsconfig.json"), JSON.stringify({
     compilerOptions: {strict:true,target:"ES2022",module:"ESNext",moduleResolution:"bundler",noEmit:true,types:["node"],skipLibCheck:true},
-    contentMappers:[{package:"@fyuuki0jp/ts2lean",extensions:[".lean"]}], include:["*.ts", "result-example/*.ts", "machine-example/*.ts", "ports-example/*.ts"],
+    contentMappers:[{package:"@fyuuki0jp/ts2lean",extensions:[".lean"]}], include:["*.ts", "result-example/*.ts", "machine-example/*.ts", "ports-example/*.ts", "history-example/*.ts"],
   }));
   const resultDir = path.join(dir, "result-example");
   await mkdir(resultDir);
@@ -158,6 +158,10 @@ test("installed package verifies general ports and emits adapter evidence",async
  expect(result.assumptions!.every(p=>p.adapter?.source?.sha256)).toBe(true);
 });
 `);
+  const historyDir=path.join(dir,"history-example");
+  await mkdir(historyDir);
+  for(const file of ["History.lean","history.ts","history.test.ts"])
+    await writeFile(path.join(historyDir,file),await readFile(path.join(root,"examples/history",file)));
   const localElan = path.join(root, ".tools/elan");
   const env = {...process.env};
   if (!env.TS2LEAN_LEAN && existsSync(path.join(localElan,"bin/lean"))) {

@@ -1,5 +1,5 @@
 import type { ObjectCompilation } from "../object-context.js";
-import { compilerOptions, withProgram } from "../native.js";
+import { projectCompilerOptions, withProgram, type TypeScriptProject } from "../native.js";
 import {
   SymbolFlags,
   TypeFlags,
@@ -157,6 +157,7 @@ export function compileEffects(
   entries: { file: string; name: string }[],
   declarations: Map<string, ContractInfo[]>,
   operation = false,
+  project?: TypeScriptProject,
 ): EffectIR {
   const virtual = new Map(
     [...declarations].map(([file, infos]) => [
@@ -167,7 +168,7 @@ export function compileEffects(
   return withProgram(
     entries.map((e) => path.resolve(e.file)),
     virtual,
-    { ...compilerOptions, types: ["node"] },
+    { types: ["node"], ...projectCompilerOptions(project) },
     (program, checker) =>
       lowerEffects(entries, declarations, operation, virtual, program, checker),
   );

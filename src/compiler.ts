@@ -1,10 +1,11 @@
 import type { ObjectCompilation } from "./object-context.js";
 import { readFileSync } from "node:fs";
-import { compilerOptions, withAPI, withProgram } from "./native.js";
+import { projectCompilerOptions, withAPI, withProgram, type TypeScriptProject } from "./native.js";
 import {
   SymbolFlags,
   TypeFlags,
   SignatureKind,
+  IndexKind,
   type Symbol as CompilerSymbol,
   type Type,
   type Program,
@@ -28,6 +29,8 @@ import {
 } from "./static.js";
 
 export type Expr = { shape: Shape } & (
+  | { kind: "evaluated"; before: Expr; value: Expr }
+  | { kind: "builtin"; operation: "array" | "append" | "length" | "slice" | "index" | "at" | "stringify" | "some"; args: Expr[] }
   | { kind: "literal"; value: string }
   | { kind: "variant"; constructor: string; values: Expr[] }
   | {
@@ -73,9 +76,12 @@ export interface FunctionIR {
   dependencies: string[];
 }
 export interface ModuleIR {
+  dataProfile?: "snapshot";
   sourceHashes: Record<string, string>;
   functions: FunctionIR[];
   records: Extract<Shape, { kind: "record" }>[];
+  /** Generated data declarations in dependency order, including intermediate sums. */
+  declarations?: Extract<Shape, { kind: "record" | "union" }>[];
   target: string;
   compositionChecks?: CompositionCheck[];
   runtimeModules?: string[];
@@ -88,12 +94,13 @@ export function compileTypeScript(
   exported: string,
   contract: ContractInfo,
   virtualFiles: Map<string, string>,
+  project?: TypeScriptProject,
 ): ModuleIR {
   module = path.resolve(module);
   return withProgram(
     [module],
     virtualFiles,
-    { ...compilerOptions, exactOptionalPropertyTypes: true },
+    projectCompilerOptions(project),
     (program, checker) =>
       lowerTypeScript(
         module,
@@ -127,9 +134,11 @@ function lowerTypeScript(
 ): ModuleIR {
   const records = new Map<string, Extract<Shape, { kind: "record" }>>();
   const generated: Extract<Shape, { kind: "record" }>[] = [];
+  const declarations: Extract<Shape, { kind: "record" | "union" }>[] = [];
   const unions = new Map<string, UnionShape>();
   let typeBindings = new Map<Type, Shape>();
   const register = (s: Shape): Shape => {
+    if (s.kind === "array" || s.kind === "optional") { register(s.element); return s; }
     if (s.kind === "union") {
       const old = unions.get(shapeKey(s));
       if (old && old.lean !== s.lean)
@@ -178,6 +187,7 @@ function lowerTypeScript(
       old = records.get(key);
     if (old) return old;
     generated.push(s);
+    declarations.push(s);
     records.set(key, s);
     return s;
   };
@@ -201,8 +211,21 @@ function lowerTypeScript(
       return { kind: "literal", value: type.value };
     }
     if (type.flags & TypeFlags.String) return {kind:"jsstring"};
+    if (type.flags & TypeFlags.NumberLike) return {kind:"safeinteger"};
+    if (type.flags & TypeFlags.Unknown) return {kind:"snapshot"};
+    if (seen.has(type)) return fail(node, "Recursive data types are unsupported.");
     if (type.isUnionType()) {
-      const members = type.getTypes().map((t) => {
+      // Instantiated/awaited native types may retain nested union aliases.
+      const flatten = (t: Type, parents = new Set<Type>()): Type[] => {
+        if (!t.isUnionType()) return [t];
+        if (parents.has(t)) return fail(node, "Recursive union aliases are unsupported");
+        return t.getTypes().flatMap(member => flatten(member, new Set(parents).add(t)));
+      };
+      const alternatives = flatten(type);
+      const defined = alternatives.filter(t => !(t.flags & TypeFlags.Undefined));
+      if (defined.length === 1 && defined.length !== alternatives.length)
+        return {kind:"optional",element:typeShape(defined[0]!,node,new Set(seen).add(type))};
+      const members = alternatives.map((t) => {
         const r = typeShape(t, node, seen);
         if (r.kind === "never") return undefined;
         if (r.kind !== "record")
@@ -220,11 +243,35 @@ function lowerTypeScript(
         return variants.every(v => v !== undefined) &&
           shapeKey({kind:"union",lean:"",tag:candidate.tag,variants:variants as UnionShape["variants"]}) === shapeKey(candidate);
       });
-      if (matches.length !== 1)
-        return fail(node, "Declare an unambiguous matching union and discriminant in the Lean contract");
-      return matches[0]!;
+      if (matches.length === 1) return matches[0]!;
+      if (matches.length > 1)
+        return fail(node, `Ambiguous Lean union representation for ${checker.typeToString(type)}`);
+      // Intermediate Result instantiations and narrower error sets need their
+      // own sum, rather than borrowing a larger contract type and its values.
+      const tags = new Set(["kind", ...[...unions.values()].map(s => s.tag)]);
+      const discriminants = [...tags].filter(tag => {
+        const values = members.map(r => r.fields.find(f => f.name === tag)?.shape);
+        return values.every(s => s?.kind === "literal") &&
+          new Set(values.map(s => JSON.stringify((s as Extract<Shape,{kind:"literal"}>).value))).size === members.length;
+      });
+      if (discriminants.length !== 1)
+        return fail(node, `Declare an unambiguous matching union and discriminant in the Lean contract: ${checker.typeToString(type)}`);
+      const tag = discriminants[0]!, lean = `Ts2LeanGenerated.Union${declarations.length}`;
+      const result: UnionShape = {kind:"union",lean,tag,variants:members.map((r,i) => ({
+        tag:(r.fields.find(f=>f.name===tag)!.shape as Extract<Shape,{kind:"literal"}>).value,
+        constructor:`${lean}.case${i}`,fields:r.fields.filter(f=>f.name!==tag),
+      }))};
+      unions.set(shapeKey(result),result);
+      declarations.push(result);
+      return result;
     }
     if (type.flags & TypeFlags.BigIntLike) return int;
+    if (checker.isArrayType(type)) {
+      if (checker.isTupleType(type)) return fail(node,"Tuple arrays are not supported");
+      const element = checker.getIndexTypeOfType(type,IndexKind.Number);
+      if (!element) return fail(node,"Array element type is missing");
+      return {kind:"array",element:typeShape(element,node,new Set(seen).add(type))};
+    }
     if (
       !(type.flags & TypeFlags.Object) ||
       type.isUnionType() ||
@@ -449,13 +496,48 @@ function lowerTypeScript(
     >();
     const dependencies = new Set<string>();
     const calls = new Map<string, { target: string; reference: string }>();
+    const trivial=(e:Expr):boolean=>{
+      switch(e.kind) {
+        case "literal":case "variable":return true;
+        case "field":return trivial(e.object);
+        case "record":return e.fields.every(f=>trivial(f.value));
+        case "variant":return e.values.every(trivial);
+        case "unary":return trivial(e.value);
+        case "binary":return trivial(e.left)&&trivial(e.right);
+        case "conditional":return trivial(e.condition)&&trivial(e.yes)&&trivial(e.no);
+        case "match":return trivial(e.object)&&e.branches.every(b=>trivial(b.value));
+        case "evaluated":return trivial(e.before)&&trivial(e.value);
+        case "call":case "builtin":return false;
+      }
+    };
+    const evaluated=(before:Expr,value:Expr):Expr=>trivial(before)?value:({kind:"evaluated",before,value,shape:value.shape});
     const coerce = (expr: Expr, target: Shape, at: ts.Node): Expr => {
       if (shapeKey(expr.shape) === shapeKey(target)) return expr;
       if (target.kind === "jsstring" && expr.shape.kind === "literal" && typeof expr.shape.value === "string")
-        return {kind:"literal", value:expr.shape.value, shape:target};
+        return evaluated(expr,{kind:"literal", value:expr.shape.value, shape:target});
       if (target.kind === "bool" && booleanShape(expr.shape)) return {...expr, shape:target};
+      if (target.kind === "optional") {
+        if (expr.shape.kind === "unit") return evaluated(expr,{kind:"literal",value:"none",shape:target});
+        return {kind:"builtin",operation:"some",args:[coerce(expr,target.element,at)],shape:target};
+      }
+      if (target.kind === "array" && expr.shape.kind === "array" && expr.kind === "builtin" && expr.operation === "array")
+        return {...expr,shape:target,args:expr.args.map(e=>coerce(e,target.element,at))};
       if (target.kind === "literal")
         return fail(at, "Literal payload must retain the exact declared value");
+      if (target.kind === "union" && expr.shape.kind === "union" && target.tag === expr.shape.tag) {
+        return {kind:"match",object:expr,shape:target,branches:expr.shape.variants.map(source => {
+          const destination=target.variants.find(v=>v.tag===source.tag);
+          if(!destination || destination.fields.length!==source.fields.length)
+            return fail(at,"Union widening must retain every source variant and payload");
+          const names=source.fields.map(()=>`v${counter++}`);
+          const values=destination.fields.map(field=>{
+            const index=source.fields.findIndex(f=>f.name===field.name);
+            if(index<0)return fail(at,"Union widening cannot rename a payload field");
+            return coerce({kind:"variable",name:names[index]!,shape:source.fields[index]!.shape},field.shape,at);
+          });
+          return {constructor:source.constructor,names,value:{kind:"variant",constructor:destination.constructor,values,shape:target}};
+        })};
+      }
       const projectField = (name: string, shape: Shape): Expr =>
         expr.kind === "record" ? expr.fields.find(f => f.name === name)!.value :
           shape.kind === "literal" ? {kind:"literal", value:String(shape.value), shape} :
@@ -470,17 +552,17 @@ function lowerTypeScript(
             if (!field) return fail(at, "Missing union payload field");
             return coerce(projectField(field.name, field.shape), f.shape, at);
           });
-          return {kind:"variant", constructor:variant.constructor, values, shape:target};
+          return evaluated(expr,{kind:"variant", constructor:variant.constructor, values, shape:target});
         }
       }
       if (target.kind === "record" && expr.shape.kind === "record" &&
           target.fields.length === expr.shape.fields.length) {
         const source = expr.shape;
-        return {kind:"record", shape:target, fields:target.fields.map(f => {
+        return evaluated(expr,{kind:"record", shape:target, fields:target.fields.map(f => {
           const field = source.fields.find(e => e.name === f.name);
           if (!field) return fail(at, "Missing record payload field");
           return {name:f.name, value:coerce(projectField(field.name, field.shape), f.shape, at)};
-        })};
+        })});
       }
       same(expr.shape, target, at);
       return expr;
@@ -552,6 +634,44 @@ function lowerTypeScript(
         return {kind:"literal",value:"()",shape:{kind:"unit"}};
       if (ts.isParenthesizedExpression(node) || ts.isSatisfiesExpression(node))
         return expression(node.expression, scope, expected);
+      if (ts.isNonNullExpression(node)) {
+        if (!ts.isElementAccessExpression(node.expression) && !(ts.isCallExpression(node.expression) &&
+            ts.isPropertyAccessExpression(node.expression.expression) && node.expression.expression.name.text === "at"))
+          return fail(node,"Non-null assertions currently require a proved array index");
+        return expression(node.expression,scope,expected);
+      }
+      if (ts.isNumericLiteral(node)) {
+        const n = Number(node.text.replaceAll("_",""));
+        if (!Number.isSafeInteger(n)) return fail(node,"Only exact safe-integer number literals are supported");
+        return {kind:"literal",shape:{kind:"safeinteger"},value:String(n)};
+      }
+      if (ts.isArrayLiteralExpression(node)) {
+        const contextual = expected?.kind === "array" ? expected : undefined;
+        let element = contextual?.element;
+        const parts: Expr[] = [];
+        for (const item of node.elements) {
+          if (ts.isOmittedExpression(item)) return fail(item,"Sparse arrays are unsupported");
+          if (ts.isSpreadElement(item)) {
+            const part=expression(item.expression,scope,contextual);
+            if(part.shape.kind!=="array")return fail(item,"Array spread requires a dense array");
+            element ??= part.shape.element;
+            same(part.shape.element,element,item);
+            parts.push(part);
+          } else {
+            const itemValue=expression(item,scope,element);
+            element ??= itemValue.shape;
+            parts.push({kind:"builtin",operation:"array",shape:{kind:"array",element},args:[coerce(itemValue,element,item)]});
+          }
+        }
+        const shape:Shape={kind:"array",element:element??{kind:"never"}};
+        return parts.length ? parts.reduce((a,b)=>({kind:"builtin",operation:"append",args:[a,b],shape}))
+          : {kind:"builtin",operation:"array",args:[],shape};
+      }
+      if (ts.isElementAccessExpression(node)) {
+        const object=expression(node.expression,scope), index=expression(node.argumentExpression,scope);
+        if(object.shape.kind!=="array"||index.shape.kind!=="safeinteger")return fail(node,"Indexing requires an array and safe-integer number");
+        return {kind:"builtin",operation:"index",args:[object,index],shape:object.shape.element};
+      }
       if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
         return {
           kind: "literal",
@@ -610,16 +730,18 @@ function lowerTypeScript(
       }
       if (ts.isPropertyAccessExpression(node)) {
         const object = expression(node.expression, scope);
+        if (object.shape.kind === "array" && node.name.text === "length")
+          return {kind:"builtin",operation:"length",args:[object],shape:{kind:"safeinteger"}};
         if (object.kind === "record") {
           const f = object.fields.find((f) => f.name === node.name.text);
-          if (f) return f.value;
+          if (f) return evaluated(object,f.value);
         }
         const field =
           object.shape.kind === "record" &&
           object.shape.fields.find((f) => f.name === node.name.text);
         if (!field) return fail(node, "Unknown record field.");
         if (field.shape.kind === "literal")
-          return {kind:"literal", value:String(field.shape.value), shape:field.shape};
+          return evaluated(object,{kind:"literal", value:String(field.shape.value), shape:field.shape});
         return { kind: "field", object, name: field.name, shape: field.shape };
       }
       if (ts.isObjectLiteralExpression(node)) {
@@ -648,7 +770,9 @@ function lowerTypeScript(
               p,
               "The JavaScript __proto__ setter syntax is unsupported.",
             );
-          return { name: p.name.text, value: expression(p.initializer, scope) };
+          const fieldName=p.name.text;
+          const fieldShape=expected?.kind==="record"?expected.fields.find(f=>f.name===fieldName)?.shape:undefined;
+          return { name: p.name.text, value: expression(p.initializer, scope,fieldShape) };
         });
         if (
           !fields.length ||
@@ -669,10 +793,12 @@ function lowerTypeScript(
       if (ts.isPrefixUnaryExpression(node)) {
         const value = expression(node.operand, scope);
         if (node.operator === ts.SyntaxKind.MinusToken) {
+          if(value.shape.kind==="safeinteger")return {kind:"unary",operator:"-",value,shape:value.shape};
           same(value.shape, int, node);
           return { kind: "unary", operator: "-", value, shape: int };
         }
         if (node.operator === ts.SyntaxKind.ExclamationToken) {
+          if(value.shape.kind==="safeinteger")return {kind:"binary",operator:"===",left:value,right:{kind:"literal",value:"0",shape:value.shape},shape:bool};
           same(value.shape, bool, node);
           if (value.kind === "literal")
             return {
@@ -728,17 +854,21 @@ function lowerTypeScript(
           right.shape.kind === "literal"
         ) {
           const equal = left.shape.value === right.shape.value;
-          return {
+          return evaluated(left,evaluated(right,{
             kind: "literal",
             shape: bool,
             value: String(operator === "===" ? equal : !equal),
-          };
+          }));
         }
         same(left.shape, right.shape, node);
         if (["&&", "||"].includes(operator)) same(left.shape, bool, node);
         else if (["===", "!=="].includes(operator)) {
-          if (["record", "union"].includes(left.shape.kind))
+          if(left.shape.kind==="optional" && !["int","bool","jsstring","string","unit","literal"].includes(left.shape.element.kind))
+            return fail(node,"Optional equality currently supports primitive non-number values only");
+          if (["record", "union", "array", "snapshot"].includes(left.shape.kind))
             return fail(node, "Object identity comparisons are unsupported.");
+        } else if(left.shape.kind==="safeinteger") {
+          if(["+","-","*"].includes(operator))return fail(node,"General IEEE754 arithmetic is unsupported; safe-integer numbers currently support comparisons and unary negation only");
         } else same(left.shape, int, node);
         return {
           kind: "binary",
@@ -786,6 +916,28 @@ function lowerTypeScript(
         return { kind: "conditional", condition, yes, no, shape: target };
       }
       if (ts.isCallExpression(node)) {
+        if(ts.isPropertyAccessExpression(node.expression)) {
+          const access=node.expression;
+          if(ts.isIdentifier(access.expression)&&access.expression.text==="JSON"&&access.name.text==="stringify") {
+            const global=symbol(access.expression);
+            if(!global.declarations.length || !global.declarations.every(d=>program.isSourceFileDefaultLibrary(d.resolve()!.getSourceFile())) || node.arguments.length!==1)
+              return fail(node,"Use the standard one-argument JSON.stringify");
+            const input=expression(node.arguments[0]!,scope);
+            if(input.shape.kind!=="snapshot")return fail(node,"JSON.stringify requires an explicitly modeled immutable Snapshot payload");
+            return {kind:"builtin",operation:"stringify",args:[input],shape:{kind:"optional",element:{kind:"jsstring"}}};
+          }
+          if(["slice","at"].includes(access.name.text) && checker.isArrayType(checker.getTypeAtLocation(access.expression))) {
+            const receiver=expression(access.expression,scope);
+            if(receiver.shape.kind!=="array")return fail(node,"Array methods require a dense array");
+            if(node.typeArguments?.length || node.arguments.some(ts.isSpreadElement) ||
+              node.arguments.length<1 || node.arguments.length>(access.name.text==="slice"?2:1))
+              return fail(node,"Unsupported array method arguments");
+            const args=node.arguments.map(a=>expression(a,scope));
+            for(const a of args)same(a.shape,{kind:"safeinteger"},node);
+            return {kind:"builtin",operation:access.name.text as "slice"|"at",args:[receiver,...args],
+              shape:access.name.text==="slice"?receiver.shape:receiver.shape.element};
+          }
+        }
         if (
           node.arguments.some(ts.isSpreadElement)
         )
@@ -1085,7 +1237,61 @@ function lowerTypeScript(
     return result;
     } finally { program = previousProgram; checker = previousChecker; typeBindings = previousBindings; }
   };
-  const target = compileFunction(targetValue as StaticFunction);
+  const root=targetValue as StaticFunction;
+  const bindGeneric=(type:Type, expected:Shape, at:ts.Node):void=>{
+    if(type.flags & TypeFlags.TypeParameter) {
+      const old=typeBindings.get(type);
+      if(old)same(old,expected,at); else typeBindings.set(type,expected);
+      return;
+    }
+    if(expected.kind==="array" && checker.isArrayType(type)) {
+      bindGeneric(checker.getIndexTypeOfType(type,IndexKind.Number)!,expected.element,at);return;
+    }
+    if(expected.kind==="optional"&&type.isUnionType()) {
+      const defined=type.getTypes().filter(t=>!(t.flags&TypeFlags.Undefined));
+      if(defined.length===1)bindGeneric(defined[0]!,expected.element,at);
+      return;
+    }
+    if(expected.kind==="union"&&type.isUnionType()) {
+      for(const member of type.getTypes()) {
+        const tag=checker.getTypeOfPropertyOfType(member,expected.tag);
+        const variant=tag&&(tag.isStringLiteralType()||tag.isBooleanLiteralType())&&expected.variants.find(v=>v.tag===tag.value);
+        if(!variant)return fail(at,"Generic union discriminants do not match the contract");
+        for(const f of variant.fields) {
+          const t=checker.getTypeOfPropertyOfType(member,f.name);
+          if(t)bindGeneric(t,f.shape,at);
+        }
+      }
+      return;
+    }
+    if(expected.kind==="record")for(const f of expected.fields) {
+      const t=checker.getTypeOfPropertyOfType(type,f.name);
+      if(t)bindGeneric(t,f.shape,at);
+    }
+  };
+  if(runtime)({program,checker}=runtime.context(root));
+  if(root.node.typeParameters?.length) {
+    root.node.parameters.forEach(p=>{
+      const name=ts.isIdentifier(p.name)?p.name.text:undefined;
+      const expected=root.node.parameters.length===1?contract.input:contract.input.kind==="record"&&ts.isIdentifier(p.name)
+        ?contract.input.fields.find(f=>f.name===name)?.shape:undefined;
+      if(expected)bindGeneric(checker.getTypeAtLocation(p),expected,p);
+    });
+    bindGeneric(checker.getReturnTypeOfSignature(checker.getSignatureFromDeclaration(root.node)!),contract.output,root.node);
+  }
+  const genericArguments=(root.node.typeParameters??[]).map(p=>{
+    if(p.constraint)return fail(p,"Constrained generic roots require an explicit concrete wrapper");
+    const shape=typeBindings.get(checker.getTypeAtLocation(p));
+    if(!shape)return fail(p,"Cannot infer generic parameter from the contract");
+    return shape;
+  });
+  const target = compileFunction(root,genericArguments);
+  const requiresSnapshot=(v:unknown):boolean=>!!v&&typeof v==="object"&&(
+    ["array","safeinteger","snapshot","optional","builtin"].includes((v as {kind?:string}).kind??"")||Object.values(v).some(requiresSnapshot));
+  if(requiresSnapshot(functions)&&contract.dataProfile!=="snapshot")
+    throw new Failure("unsupported","Array, safe-integer and opaque data verification requires an explicit #ts2lean_snapshot_profile on the Lean contract");
+  if(ports&&requiresSnapshot(functions))
+    throw new Failure("unsupported","Snapshot safety obligations are currently supported in pure function and state-machine verification only");
   if(contract.kind==="state-machine") {
     const field=target.input.kind==="record"&&target.input.fields.find(f=>f.name==="state");
     if(!field||shapeKey(field.shape)!==shapeKey(target.output))
@@ -1115,8 +1321,10 @@ function lowerTypeScript(
   };
   for (const fn of functions) visit(fn);
   return {
+    ...(contract.dataProfile==="snapshot"?{dataProfile:"snapshot" as const}:{}),
     functions: sorted,
     records: generated,
+    declarations,
     target: target.name,
     compositionChecks: statics.checks,
     runtimeModules: sourceFiles
@@ -1136,11 +1344,12 @@ function lowerTypeScript(
 }
 
 /** Resolve Lean type imports in the same local source graph used by the compiler. */
-export function importedLeanFiles(entry: string): string[] {
+export function importedLeanFiles(entry: string, project?: TypeScriptProject): string[] {
   const files = new Set<string>(),
     seen = new Set<string>();
+  const options = projectCompilerOptions(project);
   return withAPI((api) => {
-    const resolver = api.createModuleResolver(compilerOptions);
+    const resolver = api.createModuleResolver(options);
     try {
       const visit = (file: string): void => {
         file = path.resolve(file);

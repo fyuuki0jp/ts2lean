@@ -25,6 +25,10 @@ test("actual use-cases and async helpers preserve safety for arbitrary serial co
   expect(result.evidence?.functions.some(f=>f.name.startsWith("@"))).toBe(true);
   expect(result.scope?.transactions).toBe(0);
 });
+test("intermediate Result payloads remain distinct across a port and pure helper",async()=>{
+  const result=await verifyUseCases([{fn:service.saveViaProjection,contract:save}],options());
+  expect(result.status).toBe("verified");
+});
 const broken=mutations(adapter);
 for(const name of ["noAuthorization","noCommit","wrongOrder","twice"] as const)
   test(`reject ${name} as unproved, not unsupported`,async()=>{

@@ -5,6 +5,12 @@ export interface Ports {
   readonly authorize:(input:Input)=>Promise<Reply>;
   readonly commit:(input:Input)=>Promise<Reply>;
 }
+type ProjectedReply = {readonly ok:true; readonly value:{readonly amount:bigint}} |
+  {readonly ok:false; readonly error:Problem};
+function projectReply(reply:Reply):ProjectedReply {
+  if(!reply.ok)return reply;
+  return {ok:true,value:{amount:reply.value}};
+}
 export function createService(ports:Ports) {
   async function save(input:Input):Promise<Reply> {
     const permission=await ports.authorize(input);
@@ -23,5 +29,13 @@ export function createService(ports:Ports) {
     if(!saved.ok)return saved;
     return {ok:true,value:input.amount};
   }
-  return {save,saveViaHelper};
+  async function saveViaProjection(input:Input):Promise<Reply> {
+    const permission=await ports.authorize(input);
+    if(!permission.ok)return permission;
+    const saved=await ports.commit(input);
+    const projected=projectReply(saved);
+    if(!projected.ok)return projected;
+    return {ok:true,value:projected.value.amount};
+  }
+  return {save,saveViaHelper,saveViaProjection};
 }

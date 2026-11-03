@@ -6,7 +6,7 @@ import {Failure,type LeanContract,type Result,type VerificationOptions} from "./
 /** No await between the caller's final live-reference check and publishing the
  * report. Temporary files are renamed synchronously so readers see whole JSON. */
 export async function reportVerification(contract:LeanContract|undefined,options:VerificationOptions,verify:(setFinalCheck:(check:()=>void)=>void)=>Promise<Result>):Promise<Result> {
-  const explicit=options.report??contract?.options.report;
+  const explicit=options.report??contract?.options?.report;
   const directory=explicit?.directory??process.env.TS2LEAN_REPORT_DIR;
   const runId=explicit?.runId??process.env.TS2LEAN_RUN_ID;
   if(!directory&&!runId)return verify(()=>{});

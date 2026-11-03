@@ -51,6 +51,16 @@ def bind (p : Program σ ρ ε α) (next : α → Program σ ρ ε β) : Program
     | returned r => rcases hn with ⟨rfl, rfl⟩; exact ih
     | thrown e => rcases hn with ⟨rfl, rfl⟩; exact ih
 
+@[simp] theorem wp_returnValue (r : ρ) (post : Completion α ρ ε → σ → Prop) (s : σ) :
+    (returnValue r).wp post s = post (.returned r) s := rfl
+
+@[simp] theorem wp_bind (p : Program σ ρ ε α) (next : α → Program σ ρ ε β)
+    (post : Completion β ρ ε → σ → Prop) (s : σ) :
+    (bind p next).wp post s = p.wp (fun c mid => match c with
+      | .normal a => (next a).wp post mid
+      | .returned r => post (.returned r) mid
+      | .thrown e => post (.thrown e) mid) s := rfl
+
 noncomputable def branch (condition : Prop) (yes no : Program σ ρ ε α) : Program σ ρ ε α := by
   classical exact if condition then yes else no
 

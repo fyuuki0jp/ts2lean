@@ -7,23 +7,25 @@ structure StateMachine (Input State : Type) where
   initial : State → Prop
   invariant : State → Prop
   initialWitness : ∃ s, initial s
+  /-- An explicit caller condition, also present in the execution relation. -/
+  admissible : Input → Prop := fun _ => True
 
 inductive FiniteSteps (step : State → State → Prop) : State → State → Prop where
   | refl (s) : FiniteSteps step s s
   | next {s t u} : FiniteSteps step s t → step t u → FiniteSteps step s u
 
 def StateMachine.transition (c : StateMachine I S) (f : I → S) (s t : S) : Prop :=
-  ∃ i, c.state i = s ∧ f i = t
+  ∃ i, c.admissible i ∧ c.state i = s ∧ f i = t
 
 theorem StateMachine.finite_safe (c : StateMachine I S) (f : I → S)
     (initial_safe : ∀ s, c.initial s → c.invariant s)
-    (preserves : ∀ i, c.invariant (c.state i) → c.invariant (f i))
+    (preserves : ∀ i, c.admissible i → c.invariant (c.state i) → c.invariant (f i))
     {s t : S} (initial : c.initial s) (steps : FiniteSteps (c.transition f) s t) :
     c.invariant t := by
   induction steps with
   | refl => exact initial_safe _ initial
   | next _ step ih =>
-    obtain ⟨i, rfl, rfl⟩ := step
-    exact preserves i ih
+    obtain ⟨i, allowed, rfl, rfl⟩ := step
+    exact preserves i allowed ih
 
 end Ts2Lean

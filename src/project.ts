@@ -11,6 +11,8 @@ export function createProject(
   root: string,
   options: VerificationOptions = {},
 ): ResolvedConfig {
+  if (options.tsconfig !== undefined && (typeof options.tsconfig !== "string" || !options.tsconfig))
+    throw new Failure("spec-error", "tsconfig must be a nonempty path.");
   for (const key of ["timeoutMs", "maxHeartbeats"] as const) {
     const value = options[key];
     if (value !== undefined && (!Number.isSafeInteger(value) || value <= 0)) {

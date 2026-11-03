@@ -14,6 +14,8 @@ export async function loadConfig(
   if (!config || !Array.isArray(config.bindings) || !config.bindings.length)
     throw new Failure("spec-error", "Config requires nonempty bindings.");
   const names = new Set<string>();
+  if (config.tsconfig !== undefined && (typeof config.tsconfig !== "string" || !config.tsconfig))
+    throw new Failure("spec-error", "tsconfig must be a nonempty path.");
   for (const b of config.bindings) {
     if (
       !b ||

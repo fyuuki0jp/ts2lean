@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "contentMappers": [{ "package": "@fyuuki0jp/ts2lean", "extensions": [".lean"] }],
+  "include": ["*.ts"]
+}

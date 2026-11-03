@@ -14,6 +14,10 @@ export type Shape =
   | { kind: "bool" }
   | { kind: "string" }
   | { kind: "jsstring" }
+  | { kind: "safeinteger" }
+  | { kind: "snapshot" }
+  | { kind: "array"; element: Shape }
+  | { kind: "optional"; element: Shape }
   | { kind: "unit" }
   | { kind: "never" }
   | { kind: "literal"; value: string | boolean }
@@ -26,6 +30,8 @@ export interface Binding {
   contract: string;
 }
 export interface VerificationOptions {
+  /** TypeScript project file, relative to root. Defaults to root/tsconfig.json when present. */
+  tsconfig?: string;
   /** One complete result per invocation, after final live-reference checks. */
   report?: {directory:string; runId:string};
   /** Directories containing imported Lean modules, relative to the config. */
@@ -45,6 +51,7 @@ export interface ResolvedConfig extends Config {
   maxHeartbeats: number;
 }
 export interface ContractInfo {
+  dataProfile?: "snapshot" | null;
   kind?: "pure" | "module" | "operation" | "system" | "state-machine" | "port" | "use-case";
   world?: {state:string; event:string; error:string};
   module?: ModuleMetadata;
@@ -75,6 +82,12 @@ export interface Result {
   axioms?: string[];
   /** Function spans identify translated source, not whole-file or branch coverage. */
   evidence?: {
+    dataProfile?: {
+      name:"snapshot";
+      assumptions:string[];
+      numberDomain:string;
+      safety:string;
+    };
     profile: string;
     contract: { file: string; name: string };
     contracts?: {file:string; name:string; target?:string}[];
@@ -118,6 +131,7 @@ export class Failure extends Error {
 }
 export const defineConfig = (config: Config): Config => config;
 export function shapeKey(s: Shape): string {
+  if (s.kind === "array" || s.kind === "optional") return JSON.stringify([s.kind,shapeKey(s.element)]);
   if (s.kind === "literal") return JSON.stringify(["literal", s.value]);
   if (s.kind === "union")
     return JSON.stringify([
@@ -139,6 +153,10 @@ export function shapeKey(s: Shape): string {
     : s.kind;
 }
 export function tsType(s: Shape): string {
+  if (s.kind === "safeinteger") return "number";
+  if (s.kind === "snapshot") return "unknown";
+  if (s.kind === "array") return `readonly (${tsType(s.element)})[]`;
+  if (s.kind === "optional") return `(${tsType(s.element)} | undefined)`;
   if (s.kind === "unit") return "undefined";
   if (s.kind === "never") return "never";
   if (s.kind === "literal") return JSON.stringify(s.value);

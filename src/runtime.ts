@@ -95,7 +95,15 @@ async function verifyUseCasesInternal(entries:readonly UseCaseEntry[],options:Us
 
 /** Generated snapshot modules freeze the exact inputs used to create their functions. */
 export function defineSourceSnapshot(source: SourceSnapshot): SourceSnapshot {
+  const freezeOptions = <T>(value: T): T => {
+    if (value && typeof value === "object") {
+      for (const child of Object.values(value)) freezeOptions(child);
+      Object.freeze(value);
+    }
+    return value;
+  };
   return Object.freeze({ ...source,
+    compilerOptions: source.compilerOptions && freezeOptions(structuredClone(source.compilerOptions)),
     files: Object.freeze({ ...source.files }), roots: Object.freeze([...source.roots]),
     resolutions: Object.freeze(source.resolutions.map((r) => Object.freeze({ ...r }))),
     specs: Object.freeze([...source.specs]), lean: Object.freeze({ ...source.lean }),

@@ -66,6 +66,18 @@ def invoke (p : Program σ O E Unit) : Program σ R E O where
     · exact p.sound _ _ h _ _ hp
     · exact p.sound _ _ h _ _ hp
 
+@[simp] theorem wp_awaitPort (p : PortContract S Ev E I O) (i : I)
+    (post : Completion O R E → World S Ev → Prop) (w : World S Ev) :
+    (awaitPort p i).wp post w =
+      (∀ o s, p.step w.state i o s → post (outcomeCompletion o) (after p i w o s)) := rfl
+
+@[simp] theorem wp_invoke (p : Program σ O E Unit)
+    (post : Completion O R E → σ → Prop) (s : σ) :
+    (invoke p).wp post s = p.wp (fun c t => match c with
+      | .returned o => post (.normal o) t
+      | .thrown e => post (.thrown e) t
+      | .normal _ => False) s := rfl
+
 /-- Every completed invocation, including exceptions, is an operation step.
     Safety is never used to filter the transition relation. -/
 def transition (p : I → Program σ O E Unit) (s t : σ) : Prop :=

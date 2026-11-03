@@ -315,6 +315,7 @@ export class LeanWorkspace {
       line.slice(line.indexOf("TS2LEAN_CONTRACT:") + 17),
     ) as ContractInfo;
     const validate = (s: Shape): void => {
+      if(s.kind==="array"||s.kind==="optional")validate(s.element);
       if (s.kind === "union") {
         if (
           !/^[A-Za-z_]\w*(\.[A-Za-z_]\w*)*$/.test(s.lean) ||

@@ -70,7 +70,7 @@ npm test
 | reducer | boolean分岐、対応型の局所更新、`kind` unionに対応。`switch`、record spread、配列操作は未対応 |
 | DBポート | `ledger-v1`の操作と明示した外部法則のみ。D1の任意CAS・lease・checkpointは未対応 |
 
-導入先のJSON・DB・UIとの互換性を保つため、次の段階で拡張します。以下は今後の実装計画です。booleanタグと限定的なgeneric helperの具体化は0.1.2で対応しています。
+導入先のJSON・DB・UIとの互換性を保つため、次の段階で拡張します。以下は0.1.2時点での拡張計画です。文字列・汎用ポート・snapshot領域などの実装済み範囲は後述の0.2／0.3節を参照してください。
 
 1. **文字列・欠損値**：ID/hashの等値比較をUTF-16 code unit列で定義します。プロパティなし、存在する`undefined`、`null`、値を区別します。booleanタグは`#ts2lean_bool_union`で明示し、constructor名から推測しません。
 2. **IEEE754のnumber**：公開TypeScript型を`number`のまま保ち、binary64の丸め、NaN、±Infinity、±0、subnormal、strict equalityをモデル化します。安全な整数counterには範囲条件下で整数算術へ接続する証明補題を使い、小数timelineには丸めを保った順序・範囲・誤差の契約を使います。`Int`やLeanの`Float`へ単に置換して対応済みとはしません。
@@ -123,7 +123,7 @@ JavaScriptから得た返値・タグ・payload、およびcallbackの完了・�
 
 0.1.2から、`#ts2lean_bool_union Outcome "ok" Outcome.ok Outcome.err`でLeanの2-constructor帰納型と実際のbooleanタグの対応を宣言できます。タグとpayloadの衝突、constructorの重複、不正な所属、相反する登録は拒否します。Content Mapperは同じboolean literalとreadonly payloadを出力します。登録型は契約の入力・出力に直接現れない中間Resultにも使えます。
 
-呼び出しごとに具体的な型引数と実関数インスタンスをキーにしてhelperを変換します。明示型引数と、`value:T`のような直接の型変数引数からの推論に対応します。複合型だけからの推論、genericな検証ルート、再帰、高階callback、generatorは拒否します。必須payloadが`never`のvariantは除外し、残りが1つならreadonly recordとして扱います。未解決の型変数を`any`へ置換しません。
+呼び出しごとに具体的な型引数と実関数インスタンスをキーにしてhelperを変換します。明示型引数と、`value:T`のような直接の型変数引数からの推論に対応します。0.1.2では複合型だけからの推論、genericな検証ルート、再帰、高階callback、generatorは拒否します。genericルートの追加対応は後述の0.3節を参照してください。必須payloadが`never`のvariantは除外し、残りが1つならreadonly recordとして扱います。未解決の型変数を`any`へ置換しません。
 
 booleanタグの分岐はLeanのconstructor別のmatchへ変換します。`if (!step.ok) return step;`の失敗分岐には後続処理を接続しません。異なる具体Resultへの失敗返却は、タグとpayloadの互換性を検査して対応するconstructorへ再構築します。これは値の保持であり、JavaScriptオブジェクトのidentityの証明ではありません。
 
@@ -138,7 +138,7 @@ booleanタグの分岐はLeanのconstructor別のmatchへ変換します。`if (
 
 `Ts2Lean.Ports.PortContract`と`UseCase`はledger以外の任意の明示的なポート遷移を扱います。[APIと逐次保証の範囲](../examples/ports/README.md)。ポートは満たせる返値・同期throw・Promise rejectionを持つ関係として定義します。各外部法則は結び付けたreceiverとメソッドだけに適用し、アダプターrefinementは仮定として報告します。変換された本番関数の全completion・トレース・状態を検査し、複数entryの任意有限の直列呼出しへ接続します。呼出し中断・クラッシュ・並行interleavingや動的generator合成の証明ではありません。
 
-nullable/optional、readonly配列、`JSON.stringify`、IEEE754 number、任意generic carrierは今後の対応です。Unitは実値`undefined`だけを表し、`void`入力/返値は拒否します。TypeScriptの`void`は「返値を無視する」型でもあり、実値が常にundefinedとは限らないためです。
+0.2ではnullable/optional、readonly配列、`JSON.stringify`、IEEE754 number、任意generic carrierは対象外です。制限したsnapshot領域の追加対応は次の0.3節を参照してください。Unitは実値`undefined`だけを表し、`void`入力/返値は拒否します。TypeScriptの`void`は「返値を無視する」型でもあり、実値が常にundefinedとは限らないためです。
 
 ## 検証レポートとカバー率への接続
 
@@ -151,3 +151,33 @@ Vitestのmatcherを変えず、Viteプラグインに`report: { directory: ".ts2
 spanは翻訳した関数の識別情報であり、ファイル全体・すべてのstatement/branch・別capture環境を加点する根拠ではありません。各`status`と現行ソースhashを照合し、最内function・対象の具体化・契約の前提・adapter仮定・実initializerの接続・業務成功/拒否の到達可能性を利用側のscope auditで区別してください。外部ポートが常にResult.errを返すモデルでは正常成功分岐は到達しません。このAPIは成功到達可能性や全体カバー率を自動で保証しません。
 
 レポートは証明対象の具体化を識別するための証拠です。同じ関数の別capture値・別依存・別ポートbindingへ結果を流用してはいけません。単一の成功Resultから、対応していない入力型や別実装まで「全入力を検証済み」と拡張することもできません。
+
+## 0.3: 明示的なsnapshot領域とgenericな履歴
+
+`#ts2lean_snapshot_profile contract`は、通常の不変データと安全な整数に限定した追加領域へのopt-inです。`Ts2Lean.SafeInteger`を`number`、`Ts2Lean.Snapshot`を不透明な`unknown`、`List T`を`readonly T[]`、`Option T`を必須値の`T | undefined`へ対応させます。optional propertyや`null`の一般対応ではありません。
+
+SafeIntegerは`[-9007199254740991, 9007199254740991]`内の整数とsigned zeroを保持します。比較と符号反転に対応し、numberの四則演算・小数・NaN・Infinityは未対応です。IEEE754全体をIntで近似しません。opaque payload内部の値にはこの数値制限を適用しません。
+
+配列literal・spread・length・slice・at・添字参照を扱います。通常のdense配列、own data要素、標準iterator/species/prototype、外部変更なしを前提とします。各中間配列の長さが`2^32 - 1`以下であることと、各at/添字参照が範囲内であることをLeanで証明します。配列のmap/filter/swap、高階callback、hole、一般ヒープidentityは未対応です。
+
+Snapshotはidentityと`Option JSString`の観測からなるatomです。`JSON.stringify`は標準globalの1引数呼出しだけを受理します。payloadのserializerが純粋・安定・非throwであることが境界です。観測にはundefined、キー順、Unicode code unitの区別を保持します。同じ観測が別のidentityを同一化することはありません。
+
+生成された定理は`domain input → pre input → safe input ∧ domain output ∧ post input output`です。添字を全域関数として表すためのfallbackは、別途証明する範囲条件によって到達不能になります。安全条件を遷移関係のフィルタに入れて危険な実行を除外することはありません。discardされた式も評価時の安全条件を保持します。
+
+状態機械の`admissible`は入力に課す明示的な条件で、生成遷移と1-step証明の両方に現れます。任意有限列の保証もこの条件を満たす呼出し列に対するものです。固定上限50/80と実initializerの接続、内容・順序を保つ編集契約は[履歴example](../examples/history/README.md)を参照してください。snapshot領域の非同期ポート接続は未対応として拒否します。
+
+genericな検証ルートは契約のinput/outputから型変数を具体化します。同じ型変数への矛盾した割当て、未解決の型変数、制約付きgeneric rootは拒否します。generic関数のすべての具体型・可変payloadについて証明済みになるわけではありません。結果の`evidence.dataProfile`に数値・配列・JSONの前提を記録します。
+
+## TypeScriptプロジェクト設定と閉じたsnapshot
+
+Viteプラグインに`ts2lean({ tsconfig: "tsconfig.proof.json" })`、CLIのconfigに`tsconfig`を指定できます。パスはrootからの相対パスです。省略時はroot直下の`tsconfig.json`があれば読み込み、なければライブラリの既定設定を使います。TypeScript native APIで`extends`と`paths`を解決し、実効compiler optionsと各importの解決先をsnapshotのhashに含めます。読み込み済み関数の検証時には現在のtsconfigや依存ソースを読み直しません。
+
+型検査を省略する設定は受け継がず、strict・strictNullChecks・exactOptionalPropertyTypes・noEmitを有効にします。出力先、rootDir、incremental/composite等のビルド設定は個別の証明プログラムには適用しません。Content Mapperは外部実行せず、Leanから検査済みの宣言を渡します。Vite自身の実行時alias設定は別途必要です。
+
+## 中間Resultとエラーunionの拡張
+
+契約の型と一致しない中間の`Result<T,E>`には、ソースの全variantとpayloadから専用のLean帰納型を生成します。`kind`、または既存の明示的なboolean mappingで登録されたフィールドを使い、一意なliteral discriminantがない場合は拒否します。外部契約の入出力は引き続き完全な構造一致を要求します。
+
+`Result<boolean, SmallError>`から`Result<boolean, WideError>`などへの拡張は、元の全variantをmatchし、同じtag・payload名へ再構築します。payloadの型も再帰的に検査します。元の型を広い型で代用して、実際には存在しない値を入力に追加しません。ポートの返値と純粋helperのResultを異なる具体型で扱えます。
+
+ambient型のentry pointは読み込み時にプロジェクトの起点で解決し、実体をsnapshotのrootへ含めます。閉じた型検査ではパッケージ名からentry pointを再探索せず、取り込み済みのrootを使います。pnpm等のsymlinkを後からたどって別の型へ差し替えることはありません。

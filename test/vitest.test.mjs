@@ -385,3 +385,28 @@ test('same source snapshot cannot collapse separately loaded handles',async()=>{
     await f.cleanup();
   }
 });
+
+test("Vitest captures paths from an explicit inherited proof tsconfig", async () => {
+  const f = await fixture('import { increment } from "@/helper"; export function run(x:bigint):bigint{return increment(x);}', intSpec);
+  try {
+    await prepare(f);
+    await writeFile(path.join(f.dir,"base.json"), JSON.stringify({compilerOptions:{target:"ES2022",module:"ESNext",moduleResolution:"bundler",types:["node"],paths:{"@/*":["./*"]}}}));
+    await writeFile(path.join(f.dir,"tsconfig.proof.json"), JSON.stringify({extends:"./base.json",include:["*.ts"],contentMappers:[{package:"@fyuuki0jp/ts2lean",extensions:[".lean"]}]}));
+    await writeFile(path.join(f.dir,"helper.ts"),'export function increment(x:bigint):bigint{return x+1n;}');
+    await writeFile(path.join(f.dir,"vitest.config.ts"),`
+      import {defineConfig} from "vitest/config";
+      import {ts2lean} from "@fyuuki0jp/ts2lean/vite";
+      export default defineConfig({root:import.meta.dirname,resolve:{alias:{"@":import.meta.dirname}},
+        plugins:[ts2lean({tsconfig:"tsconfig.proof.json"})],test:{include:["binding.test.ts"],testTimeout:60000}});
+    `);
+    await writeFile(path.join(f.dir,"binding.test.ts"),`
+      import {test,expect} from "vitest";
+      import "@fyuuki0jp/ts2lean/vitest";
+      import {run} from "./main";
+      import {contract} from "./Spec.lean";
+      test("real aliased helper verifies",async()=>{await expect(run).toVerify(contract);});
+    `);
+    const result=await vitest(f);
+    assert.equal(result.code,0,result.output);
+  } finally {await f.cleanup();}
+});

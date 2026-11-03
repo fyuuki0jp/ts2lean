@@ -10,6 +10,12 @@ private partial def shape (type : Expr) (seen : List Name := []) : MetaM Json :=
   if type.isConstOf ``Int then return Json.mkObj [("kind", toJson "int")]
   if type.isConstOf ``Bool then return Json.mkObj [("kind", toJson "bool")]
   if type.isConstOf ``JSString then return Json.mkObj [("kind", toJson "jsstring")]
+  if type.isConstOf ``SafeInteger then return Json.mkObj [("kind", toJson "safeinteger")]
+  if type.isConstOf ``Snapshot then return Json.mkObj [("kind", toJson "snapshot")]
+  if type.isAppOfArity ``List 1 then
+    return Json.mkObj [("kind", toJson "array"), ("element", ← shape type.getAppArgs[0]! seen)]
+  if type.isAppOfArity ``Option 1 then
+    return Json.mkObj [("kind", toJson "optional"), ("element", ← shape type.getAppArgs[0]! seen)]
   if type.isConstOf ``PUnit then return Json.mkObj [("kind", toJson "unit")]
   let .const name _ := type | throwError "Only Int, Bool, and monomorphic structures are supported: {type}"
   if seen.contains name then throwError "Recursive structures are unsupported: {name}"
@@ -74,7 +80,7 @@ elab "#ts2lean_contract " id:ident : command => liftTermElabM do
     throwError "Expected Ts2Lean.Contract or StateMachine, got {t}"
   let args := t.getAppArgs
   let supportingTypes ← (boolUnionMappings.getState (← getEnv)).mapM fun entry => shape (mkConst entry.1)
-  let json := Json.mkObj [("supportingTypes", Json.arr supportingTypes), ("name", toJson id.getId.toString), ("unfold", toJson ((← userDefinitions e.constName!).map Name.toString)), ("input", ← shape args[0]!), ("output", ← shape args[1]!)]
+  let json := Json.mkObj [("dataProfile", if (snapshotProfiles.getState (← getEnv)).contains e.constName! then toJson "snapshot" else Json.null), ("supportingTypes", Json.arr supportingTypes), ("name", toJson id.getId.toString), ("unfold", toJson ((← userDefinitions e.constName!).map Name.toString)), ("input", ← shape args[0]!), ("output", ← shape args[1]!)]
   logInfo m!"TS2LEAN_CONTRACT:{json.compress}"
 
 elab "#ts2lean_ports_contract " id:ident : command => liftTermElabM do

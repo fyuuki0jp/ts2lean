@@ -1,5 +1,5 @@
 import path from "node:path";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { ScriptTarget, isStringLiteralLikeNode, type SourceFile } from "typescript/ast";
 import {
@@ -24,6 +24,31 @@ export const compilerOptions: RawCompilerOptions = {
   skipLibCheck: true,
   allowImportingTsExtensions: true,
 };
+
+export interface TypeScriptProject { root: string; tsconfig?: string }
+
+/** Resolve extends and paths through the compiler; never execute content mappers. */
+export function projectCompilerOptions(project?: TypeScriptProject): RawCompilerOptions {
+  if (!project) return { ...compilerOptions, exactOptionalPropertyTypes: true };
+  const file = path.resolve(project.root, project.tsconfig ?? "tsconfig.json");
+  if (!project.tsconfig && !existsSync(file))
+    return {...projectCompilerOptions(), configFilePath: file};
+  if (!existsSync(file)) throw new Failure("type-error", `Cannot read TypeScript config: ${file}`);
+  return withAPI(api => {
+    const parsed = api.parseConfigFile(file);
+    // We supply individual roots and our own checked Lean declarations. Neither
+    // empty include sets nor disabled external content mappers block this program.
+    const errors = parsed.errors.filter(error => ![18003, 18068].includes(error.code));
+    if (errors.length) throw new Failure("type-error", formatDiagnosticsWithColorAndContext(errors, api));
+    const options: RawCompilerOptions = { ...compilerOptions, ...parsed.options };
+    // Build layout and incremental caches do not apply to an in-memory proof program.
+    for (const key of ["rootDir", "outDir", "outFile", "declarationDir", "tsBuildInfoFile"] as const)
+      delete (options as Record<string, unknown>)[key];
+    return { ...options, noEmit: true, noCheck: false, strict: true, strictNullChecks: true,
+      exactOptionalPropertyTypes: true, composite: false, incremental: false,
+      declaration: false, declarationMap: false, emitDeclarationOnly: false };
+  });
+}
 
 /** Keep remote ASTs, symbols, and types within the callback's lifetime. */
 export function withAPI<T>(run: (api: API) => T): T {
@@ -118,11 +143,13 @@ export function captureSourceSnapshot(
   file: string,
   code: string,
   lean: Readonly<Record<string, string>>,
+  project?: TypeScriptProject,
 ): SourceSnapshot {
+  const options = { types: ["node"], ...projectCompilerOptions(project) };
   return withAPI((api) => {
     const snapshot = api.createSnapshot({
       fileSystem: createFileSystemLayer([[file, code]]),
-      createPrograms: [{ rootFiles: [file], compilerOptions: { ...compilerOptions, types: ["node"] } }],
+      createPrograms: [{ rootFiles: [file], compilerOptions: options }],
     });
     try {
       const program = snapshot.operation.createdPrograms[0];
@@ -158,7 +185,9 @@ export function captureSourceSnapshot(
           if (path.dirname(dir) === dir) break;
         }
       }
-      const data = { root: file, files, roots, resolutions, specs: [...specs], lean };
+      const configFile = project && path.resolve(project.root, project.tsconfig ?? "tsconfig.json");
+      const data = { root: file, files, roots, resolutions, specs: [...specs], lean,
+        compilerOptions: options, tsconfig: configFile && existsSync(configFile) ? configFile : undefined };
       return { id: createHash("sha256").update(JSON.stringify(data)).digest("hex"), ...data };
     } finally { snapshot.dispose(); }
   });
@@ -178,7 +207,9 @@ export function openSnapshotProgram(
 ): NativeContext {
   const files = new Map(Object.entries(source.files));
   for (const entry of declarations) files.set(...entry);
-  const options = { ...compilerOptions, exactOptionalPropertyTypes: true, types: [] };
+  // Ambient entry points were already captured as roots. Looking up their package
+  // names again would depend on symlinks (e.g. pnpm) outside this closed filesystem.
+  const options = { ...(source.compilerOptions ?? { ...compilerOptions, exactOptionalPropertyTypes: true }), types: [] };
   const resolutions = new Map(source.resolutions.map((r) =>
     [JSON.stringify([r.directory, r.name, r.mode]), r.file]));
   const resolver = api.createModuleResolver(options, {

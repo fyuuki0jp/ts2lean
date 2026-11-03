@@ -1,11 +1,27 @@
 import Lean
 import Lean.Elab.Tactic.Omega
 import Ts2Lean.JSString
+import Ts2Lean.Snapshot
 import Ts2Lean.StateMachine
 
 namespace Ts2Lean
 
 open Lean Meta Elab Command
+
+/-- Explicit opt-in to the immutable dense-data / safe-integer boundary.
+The verifier records these assumptions with the result. -/
+initialize snapshotProfiles : SimplePersistentEnvExtension Name (Array Name) ←
+  registerSimplePersistentEnvExtension {
+    addEntryFn := fun entries entry => entries.push entry
+    addImportedFn := fun imports => imports.foldl (· ++ ·) #[]
+  }
+
+elab "#ts2lean_snapshot_profile " id:ident : command => do
+  let name ← liftTermElabM do
+    let e ← Elab.Term.elabTerm id none
+    let .const name _ := e | throwError "Expected a contract name"
+    return name
+  modifyEnv fun env => snapshotProfiles.addEntry env name
 
 /-- Explicit JavaScript representation of a two-constructor inductive. -/
 structure BoolUnionMapping where

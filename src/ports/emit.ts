@@ -1,5 +1,5 @@
 import type {ModuleIR, Term} from "../compiler.js";
-import {emitExpr,emitTerm,leanName,leanType} from "../emit.js";
+import {emitExpr,emitTerm,emitDataDeclarations,leanName,leanType} from "../emit.js";
 import type {ContractInfo} from "../types.js";
 function term(t:Term, indent=2):string {
   const pad=" ".repeat(indent);
@@ -19,7 +19,7 @@ function term(t:Term, indent=2):string {
 export function portModel(ir:ModuleIR,c:ContractInfo,index:number):string {
   const w=c.world!;
   return `namespace Case${index}\nnamespace Ts2LeanGenerated\n`+
-    ir.records.map(r=>`structure ${leanName(r.lean.split(".").at(-1)!)} where\n${r.fields.map(f=>`  ${leanName(f.name)} : ${leanType(f.shape)}`).join("\n")}\n`).join("\n")+
+    emitDataDeclarations(ir)+
     ir.functions.map(f=>`def ${f.name} (${f.parameter} : ${leanType(f.input)}) : ${f.async ? `Ts2Lean.Semantics.Program (Ts2Lean.Ports.World ${leanName(w.state)} ${leanName(w.event)}) ${leanType(f.output)} ${leanName(w.error)} Unit` : leanType(f.output)} :=\n${f.async?term(f.body):emitTerm(f.body)}\n`).join("\n")+
     `end Ts2LeanGenerated\nend Case${index}\n`;
 }
@@ -29,8 +29,9 @@ export function portProof(cases:{ir:ModuleIR;contract:ContractInfo}[], ports:Con
   const w=cases[0]!.contract.world!;
   const world=`Ts2Lean.Ports.World ${leanName(w.state)} ${leanName(w.event)}`;
   const definitions=cases.flatMap((c,i)=>c.ir.functions.map(f=>`Case${i}.Ts2LeanGenerated.${f.name}`));
-  const defs=[...unfold,...definitions,"Ts2Lean.Semantics.Program.bind","Ts2Lean.Semantics.Program.returnValue","Ts2Lean.Ports.awaitPort","Ts2Lean.Ports.after","Ts2Lean.Ports.outcomeCompletion","Ts2Lean.Ports.invoke"];
-  const tactic=`by\n  simp_all [${defs.join(", ")}]\n  all_goals intros\n  all_goals repeat' (split at *)\n  all_goals try simp_all\n  all_goals first | omega | grind`;
+  const defs=[...unfold,...definitions,"Ts2Lean.Semantics.Program.wp_bind","Ts2Lean.Semantics.Program.wp_returnValue","Ts2Lean.Ports.wp_awaitPort","Ts2Lean.Ports.after","Ts2Lean.Ports.outcomeCompletion","Ts2Lean.Ports.wp_invoke"];
+  const simplify=`simp_all (maxSteps := ${heartbeats}) [${defs.join(", ")}]`;
+  const tactic=`by\n  ${simplify}\n  all_goals intros\n  all_goals repeat' (first | intro _ | (split at * <;> try ${simplify}))\n  all_goals try simp_all\n  all_goals first | omega | grind`;
   let code=`import Model\nset_option linter.unusedSimpArgs false\nset_option maxHeartbeats ${heartbeats}\n`;
   code+=`theorem initial_nonempty : ∃ w, ${system}.initial w := ${system}.initialWitness\n`;
   code+=`theorem initial_safe : ∀ w, ${system}.initial w → ${system}.invariant w := ${tactic}\n`;

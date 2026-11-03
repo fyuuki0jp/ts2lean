@@ -113,7 +113,7 @@ export async function processBindings(
       // All imported specifications are checked by Lean before constructing virtual TS types.
       const specs = new Set([
         ...config.bindings.map((b) => path.resolve(config.root, b.spec)),
-        ...importedLeanFiles(path.resolve(config.root, binding.module)),
+        ...importedLeanFiles(path.resolve(config.root, binding.module), config),
       ]);
       for (const spec of specs) {
         const list = await ws.discover(spec);
@@ -134,6 +134,7 @@ export async function processBindings(
         binding.export,
         target!,
         virtual,
+        config,
       );
       checkSources?.(ir);
       results.push(await proveModule(ws, ir, binding, target, mode, checkSources));
@@ -162,6 +163,14 @@ async function proveModule(
   await writeFile(path.join(ws.dir, "ir.json"), JSON.stringify(ir, null, 2) + "\n");
   await ws.compile("Model.lean");
   const evidence: NonNullable<Result["evidence"]> = {
+    ...(ir.dataProfile?{dataProfile:{
+      name:"snapshot" as const,
+      numberDomain:"Finite safe integers [-2^53+1, 2^53-1], preserving signed zero; other IEEE754 values and arithmetic are unsupported.",
+      assumptions:["Immutable dense arrays and own data properties; no accessors, Proxy, or external mutation during the execution sequence.",
+        "Standard array methods, iterator/species behavior, and JSON.stringify.",
+        "Opaque payload serialization is deterministic, nonthrowing, and has no side effects. Actual UTF-16/undefined observations are preserved, not replaced by structural equality."],
+      safety:"Every reachable index and intermediate array allocation is checked in Lean; safety is not assumed from TypeScript non-null assertions.",
+    }}:{}),
     profile:target.kind ?? "pure", contract:{file:path.resolve(ws.config.root,binding.spec), name:binding.contract},
     leanSources:await ws.sourceEvidence(),
     functions:ir.functions.map(f=>({file:f.source,name:f.localName,sha256:f.sourceHash,
@@ -185,7 +194,9 @@ async function proveModule(
     .flatMap(l=>JSON.parse(l.slice(l.indexOf("TS2LEAN_AXIOMS:")+15)) as string[]))];
   check?.(ir);
   return { status: "verified", module: binding.module, export: binding.export,
-    message: target.kind === "state-machine"
+    message: ir.dataProfile
+      ? "Lean checked the generated model, reachable index/allocation safety, and the contract under the explicit immutable-snapshot and safe-integer domain."
+      : target.kind === "state-machine"
       ? "Lean checked nonempty initial states, initial safety, preservation by the actual reducer, and arbitrary finite operation sequences."
       : "Lean checked the generated model and its axiom dependencies.", artifact: proof, axioms, evidence };
 }
