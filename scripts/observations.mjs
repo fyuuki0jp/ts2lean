@@ -5,6 +5,10 @@ export const leanName = (name) =>
     .map((n) => `«${n}»`)
     .join(".");
 export function encodeInput(shape, value) {
+  if (shape.kind === "jsstring") {
+    if (typeof value !== "string") throw Error("Invalid string");
+    return `({units := [${Array.from({length:value.length}, (_, i) => value.charCodeAt(i)).join(",") }]} : Ts2Lean.JSString)`;
+  }
   if (shape.kind === "int") {
     if (typeof value !== "string" || !/^(-?[1-9][0-9]*|0)$/.test(value))
       throw Error("Invalid decimal integer");
@@ -33,6 +37,7 @@ export function encodeInput(shape, value) {
   return `({${shape.fields.map((f) => `${leanName(f.name)} := ${encodeInput(f.shape, value[f.name])}`).join(",")}}:${leanName(shape.lean)})`;
 }
 export function leanObservation(shape, expr, depth = 0) {
+  if (shape.kind === "jsstring") return `(Lean.toJson ((${expr}).units.map UInt16.toNat))`;
   if (shape.kind === "int") return `(Lean.toJson (toString (${expr})))`;
   if (shape.kind === "bool" || shape.kind === "literal")
     return `(Lean.toJson (${expr}))`;

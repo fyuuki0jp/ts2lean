@@ -8,7 +8,8 @@ export type {
   ContractInfo,
   VerificationOptions,
   LeanContract,
+  PortBinding, UseCaseEntry, UseCaseOptions,
 } from "./types.js";
 export { loadConfig } from "./config.js";
 export { verify, extract } from "./verify.js";
-export { verifyFunction, verifySystem, VerificationError } from "./runtime.js";
+export { verifyFunction, verifySystem, verifyUseCases, bindPort, VerificationError } from "./runtime.js";

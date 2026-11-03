@@ -1,6 +1,6 @@
 # ts2lean
 
-TypeScriptの純粋関数とトランザクションを使う送金サービスをLean 4へ変換し、Leanで書いた事前条件・事後条件・不変条件をVitestから自動検証する実験的なライブラリです。対象関数とLean契約をテストで直接importして紐付けます。`bindings`を列挙する設定ファイルは不要です。
+TypeScriptの純粋関数・reducer・asyncユースケース・トランザクションを使う送金サービスをLean 4へ変換し、Leanで書いた事前条件・事後条件・不変条件をVitestから自動検証する実験的なライブラリです。対象関数とLean契約をテストで直接importして紐付けます。`bindings`を列挙する設定ファイルは不要です。
 
 ```ts
 import { expect, test } from "vitest";
@@ -14,6 +14,25 @@ test("引き出し後も残高は非負で、指定額だけ減る", async () =>
 ```
 
 入力をサンプリングして実行するテストではなく、**事前条件を満たすすべての入力に対する証明**をLeanに検査させます。利用者が証明を書く必要はありません。解けない条件は未証明としてテストが失敗します。
+
+## reducerと汎用asyncユースケース
+
+```ts
+await expect(reducer).toPreserveInvariant(machineContract);
+
+await verifyUseCases([{ fn: service.save, contract: saveContract }], {
+  ports: [
+    bindPort(auth, "authorize", authorizationContract),
+    bindPort(repository, "commit", storageContract),
+  ],
+});
+```
+
+[状態機械](examples/state-machine/README.md)は実reducerの初期状態・1-step保存を任意有限の操作列へ接続します。[汎用ポート](examples/ports/README.md)は明示したadapter法則の下で、本番async関数の返値・例外・状態・呼出しトレースと、複数entryの任意有限の直列呼出しを検証します。認可省略・commit前成功応答・順序変更・重複実行を拒否するサンプルを含みます。並行interleavingやpending await途中のクラッシュの保証は含みません。
+
+通常の`string`はLeanの`Ts2Lean.JSString`へ対応し、UTF-16 code unit列の等値比較を検証できます。nullable/optional、配列、IEEE754 numberは未対応です。
+
+matcherの呼び出しを変えずに結果を集めるには、プラグインに`report: { directory: ".ts2lean/reports", runId: "audit-20261103-unique" }`を指定します。runIdにはASCII英数字から始まる英数字・`.`・`_`・`-`を使います。成功・未証明を含むResult、実ソースの範囲とhash、具体化モデルのhash・capture、契約とadapter仮定をJSONに保存します。[保証範囲と監査への接続](docs/semantics.md#検証レポートとカバー率への接続)。
 
 ## トランザクション・並行実行・復旧の検証
 
@@ -83,7 +102,7 @@ await expect(withdraw).toVerify(withdrawContract, {
 
 `toVerify`の対象は渡された関数オブジェクトです。Viteプラグインは関数の生成時に、変換前のソース・型依存・import解決結果のスナップショットと、実際の捕捉値・依存関数を読み取る処理を紐付けます。未exportのclosureやラッパーも検証でき、同じコードから作った関数でも捕捉値が違えば別のモデルになります。読み込み後にファイルを編集・削除しても、保持している関数は生成時のソースで検証します。旧版と新版の関数を一緒に渡すこともできます。
 
-依存を別の登録済み関数へ差し替えると、現在の実関数を解析します。未登録のmockや`.bind()`の戻り値は対応するモデルがないため拒否します。一般のmockへ契約を仮定として付与するAPIは未対応です。証明で利用した依存・捕捉値・DB handleを検証前後に照合し、証明中の変更を拒否します。成功後の変更まで保証するものではありません。
+依存を別の登録済み関数へ差し替えると、現在の実関数を解析します。未登録のmockや`.bind()`の戻り値は対応するモデルがないため拒否します。純粋関数のmockを元関数の証明で代用することはできません。外部I/Oは`bindPort`で実体とポート契約を明示的に結び、仮定として区別します。証明で利用した依存・捕捉値・DB handleを検証前後に照合し、証明中の変更を拒否します。成功後の変更まで保証するものではありません。
 
 `magic-string`の役割は、この登録コードを挿入してソースマップを維持することです。差分検出や証明は行いません。関数の`toString()`から元コードを推測せず、ファイル名は生成元ノードと型情報を特定するためにだけ利用します。検証対象のソースを変換する独自プラグインは検証対象外です。
 

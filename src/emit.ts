@@ -6,7 +6,7 @@ export const leanName = (name: string): string =>
     .map((n) => `«${n}»`)
     .join(".");
 export const leanType = (shape: Shape): string =>
-  shape.kind === "int"
+  shape.kind === "unit" ? "Unit" : shape.kind === "jsstring" ? "Ts2Lean.JSString" : shape.kind === "int"
     ? "Int"
     : shape.kind === "never"
       ? "Empty"
@@ -20,7 +20,9 @@ export const leanType = (shape: Shape): string =>
 export function emitExpr(expr: Expr): string {
   switch (expr.kind) {
     case "literal":
-      return expr.shape.kind === "int"
+      return expr.shape.kind === "jsstring"
+        ? `({ units := [${Array.from({length:expr.value.length}, (_, i) => expr.value.charCodeAt(i)).join(", ")}] } : Ts2Lean.JSString)`
+        : expr.shape.kind === "int"
         ? `(${expr.value} : Int)`
         : expr.shape.kind === "literal" && typeof expr.shape.value === "string"
           ? JSON.stringify(expr.value)
@@ -56,9 +58,10 @@ export function emitExpr(expr: Expr): string {
       return `(if ${emitExpr(expr.condition)} then ${emitExpr(expr.yes)} else ${emitExpr(expr.no)})`;
   }
 }
-function emitTerm(term: Term, indent = 2): string {
+export function emitTerm(term: Term, indent = 2): string {
   const pad = " ".repeat(indent);
   switch (term.kind) {
+    case "await": throw new Error("Async term requires the port emitter");
     case "match":
       return `${pad}match ${emitExpr(term.object)} with\n${term.branches.map((b) => `${pad}| ${leanName(b.constructor)} ${b.names.join(" ")} =>\n${emitTerm(b.body, indent + 2)}`).join("\n")}`;
     case "return":
@@ -102,4 +105,26 @@ export function emitProof(
   // Keep the arithmetic fast path; grind also discharges boolean implications
   // and disjunctions that omega alone cannot derive. Both produce checked proofs.
   return `import Model\n\nset_option maxHeartbeats ${heartbeats}\n\ntheorem ts2lean_verified : Ts2Lean.Satisfies ${leanName(contract)} Ts2LeanGenerated.${ir.target} := by\n  simp_all [${unfold.join(", ")}]\n  all_goals intros\n  all_goals repeat' (split at *)\n  all_goals try simp_all [Bool.and_assoc, Bool.or_assoc]\n  all_goals first | omega | grind\n\n#ts2lean_audit ts2lean_verified\n`;
+}
+
+export function emitStateMachineProof(ir: ModuleIR, contract: string, heartbeats: number, definitions: string[]): string {
+  const c = leanName(contract), f = `Ts2LeanGenerated.${ir.target}`;
+  const unfold = [...new Set([c, ...definitions.map(leanName), ...ir.functions.map(f=>`Ts2LeanGenerated.${f.name}`)])];
+  const proof = `by\n  simp_all [${unfold.join(", ")}]\n  all_goals intros\n  all_goals repeat' (split at *)\n  all_goals try simp_all [Bool.and_assoc, Bool.or_assoc]\n  all_goals first | omega | grind`;
+  return `import Model
+set_option maxHeartbeats ${heartbeats}
+theorem ts2lean_initial_nonempty : ∃ s, ${c}.initial s := ${c}.initialWitness
+theorem ts2lean_state_projection : ${c}.state = (fun i => i.state) := rfl
+theorem ts2lean_initial_safe : ∀ s, ${c}.initial s → ${c}.invariant s := ${proof}
+theorem ts2lean_step_preserves : ∀ i, ${c}.invariant (${c}.state i) → ${c}.invariant (${f} i) := ${proof}
+theorem ts2lean_all_executions : ∀ s t, ${c}.initial s →
+    Ts2Lean.FiniteSteps (${c}.transition ${f}) s t → ${c}.invariant t := by
+  intro s t initial steps
+  exact Ts2Lean.StateMachine.finite_safe ${c} ${f} ts2lean_initial_safe ts2lean_step_preserves initial steps
+#ts2lean_audit ts2lean_initial_nonempty
+#ts2lean_audit ts2lean_state_projection
+#ts2lean_audit ts2lean_initial_safe
+#ts2lean_audit ts2lean_step_preserves
+#ts2lean_audit ts2lean_all_executions
+`;
 }

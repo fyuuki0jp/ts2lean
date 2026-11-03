@@ -36,6 +36,10 @@ jobs:
       - run: npm run typecheck:architectures
       - run: npm run verify:inventory
       - run: npm run typecheck:inventory
+      - run: npm run verify:state-machine
+      - run: npm run typecheck:state-machine
+      - run: npm run verify:ports
+      - run: npm run typecheck:ports
       - run: npm run verify:result
       - run: npm run typecheck:result
       - run: npm run verify:example

@@ -28,6 +28,7 @@ interface RegistryView {
   functions: WeakMap<Function, FunctionSource>;
   objects: WeakMap<object, RegisteredObjectSource>;
 }
+export interface GraphPort { receiver:object; key:string; fn:Function; index:number }
 
 /** Runtime reads used by one proof, with no mutation of the registered objects. */
 export class FunctionGraph {
@@ -40,7 +41,7 @@ export class FunctionGraph {
   private readonly objectIds = new Map<object, string>();
   readonly objects = new Map<string, { object: object; source: RegisteredObjectSource }>();
 
-  constructor(readonly targets: Function[], readonly registry: RegistryView) {
+  constructor(readonly targets: Function[], readonly registry: RegistryView, readonly ports: readonly GraphPort[] = []) {
     for (const fn of targets) this.collect(fn);
   }
 
@@ -69,7 +70,7 @@ export class FunctionGraph {
     for (const reference of Object.keys(source.callees())) {
       const actual = this.observe(() => source.callees()[reference], reference);
       callees.set(reference, actual);
-      if (typeof actual === "function" && this.registry.functions.has(actual)) this.collect(actual);
+      if (typeof actual === "function" && !this.ports.some(p=>p.fn===actual) && this.registry.functions.has(actual)) this.collect(actual);
     }
     const receivers = new Map<string, unknown>();
     this.receivers.set(fn, receivers);
@@ -181,6 +182,12 @@ export class FunctionGraph {
           const receivers = this.receivers.get(fn)!;
           const actual = callees.has(reference) ? callees.get(reference)
             : receivers.has(reference) ? receivers.get(reference) : this.scalar(fn, reference);
+          if (typeof actual === "function" && ts.isPropertyAccessExpression(expression)) {
+            const receiver = receivers.get(expression.expression.getText());
+            const matches = this.ports.filter(p=>p.receiver===receiver && p.fn===actual && p.key===expression.name.text);
+            if (matches.length > 1) throw new Failure("assumption-mismatch", "Ambiguous port bindings");
+            if (matches.length === 1) return {kind:"port",index:matches[0]!.index};
+          }
           if (typeof actual === "function") return functionValue(actual);
           if (typeof actual === "bigint" || typeof actual === "boolean")
             return { kind: "scalar", type: typeof actual === "bigint" ? "int" : "bool", value: String(actual) };

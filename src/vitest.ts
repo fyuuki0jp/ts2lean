@@ -4,7 +4,7 @@ import type { LeanContract, VerificationOptions } from "./types.js";
 
 expect.extend({
   async toPreserveInvariant(
-    received: Record<string, Function>,
+    received: Record<string, Function> | Function,
     contract: LeanContract,
     options?: VerificationOptions,
   ) {
@@ -12,7 +12,13 @@ expect.extend({
       throw new Error(
         "toPreserveInvariant does not support .not: unproved is not a counterexample.",
       );
-    await verifySystem(received, contract, options);
+    if (contract.profile === "state-machine") {
+      if (typeof received !== "function") throw new Error("A state-machine contract requires the actual reducer function");
+      await verifyFunction(received as (input: unknown) => unknown, contract, options);
+    } else {
+      if (typeof received === "function") throw new Error("A ledger system contract requires named entrypoints");
+      await verifySystem(received, contract, options);
+    }
     return {
       pass: true,
       message: () =>
@@ -60,4 +66,4 @@ declare module "vitest" {
   }
 }
 
-export { verifyFunction, verifySystem, VerificationError } from "./runtime.js";
+export { verifyFunction, verifySystem, verifyUseCases, bindPort, VerificationError } from "./runtime.js";

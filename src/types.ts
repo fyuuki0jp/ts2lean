@@ -13,6 +13,8 @@ export type Shape =
   | { kind: "int" }
   | { kind: "bool" }
   | { kind: "string" }
+  | { kind: "jsstring" }
+  | { kind: "unit" }
   | { kind: "never" }
   | { kind: "literal"; value: string | boolean }
   | UnionShape
@@ -24,6 +26,8 @@ export interface Binding {
   contract: string;
 }
 export interface VerificationOptions {
+  /** One complete result per invocation, after final live-reference checks. */
+  report?: {directory:string; runId:string};
   /** Directories containing imported Lean modules, relative to the config. */
   leanPaths?: string[];
   lean?: string;
@@ -41,7 +45,8 @@ export interface ResolvedConfig extends Config {
   maxHeartbeats: number;
 }
 export interface ContractInfo {
-  kind?: "pure" | "module" | "operation" | "system";
+  kind?: "pure" | "module" | "operation" | "system" | "state-machine" | "port" | "use-case";
+  world?: {state:string; event:string; error:string};
   module?: ModuleMetadata;
   name: string;
   input: Shape;
@@ -68,12 +73,30 @@ export interface Result {
   message: string;
   artifact?: string;
   axioms?: string[];
+  /** Function spans identify translated source, not whole-file or branch coverage. */
+  evidence?: {
+    profile: string;
+    contract: { file: string; name: string };
+    contracts?: {file:string; name:string; target?:string}[];
+    leanSources: { file: string; sha256: string }[];
+    functions: {
+      file: string; name: string; sha256: string; snapshot?: string; instance?: string;
+      modelName?:string; modelSha256?:string;
+      captures?: {reference:string;type:"int"|"bool";value:string}[];
+      span: { start: number; end: number; startLine: number; endLine: number };
+    }[];
+  };
   assumptions?: {
     identity: string;
     assurance: "assumed" | "proved";
     laws: { name: string; statement: string; assurance: string }[];
     settings: Record<string, string>;
     declaration: string;
+    adapter?: {
+      key:string; receiverId:string; methodId:string;
+      boundary?:string;
+      source?: NonNullable<Result["evidence"]>["functions"][number];
+    };
   }[];
   scope?: {
     functions: string[];
@@ -116,6 +139,7 @@ export function shapeKey(s: Shape): string {
     : s.kind;
 }
 export function tsType(s: Shape): string {
+  if (s.kind === "unit") return "undefined";
   if (s.kind === "never") return "never";
   if (s.kind === "literal") return JSON.stringify(s.value);
   if (s.kind === "union")
@@ -127,7 +151,7 @@ export function tsType(s: Shape): string {
       .join(" | ");
   return s.kind === "int"
     ? "bigint"
-    : s.kind === "string"
+    : s.kind === "string" || s.kind === "jsstring"
       ? "string"
       : s.kind === "bool"
         ? "boolean"
@@ -137,7 +161,7 @@ export function tsType(s: Shape): string {
 /** A runtime reference to a Lean contract, created by the Vite plugin. */
 export interface LeanContract<Input = unknown, Output = unknown> {
   readonly kind: "ts2lean.contract";
-  readonly profile?: "pure" | "module" | "operation" | "system";
+  readonly profile?: ContractInfo["kind"];
   readonly spec: string;
   readonly name: string;
   readonly root: string;
@@ -147,6 +171,9 @@ export interface LeanContract<Input = unknown, Output = unknown> {
   /** Phantom type information; no input is sampled or executed. */
   readonly types?: { readonly input: Input; readonly output: Output };
 }
+export interface PortBinding { readonly kind: "ts2lean.port-binding" }
+export interface UseCaseEntry { readonly fn: Function; readonly contract: LeanContract }
+export interface UseCaseOptions extends VerificationOptions { readonly ports: readonly PortBinding[] }
 
 export interface ApiType {
   kind: string;

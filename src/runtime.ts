@@ -4,6 +4,7 @@ import {
   type LeanContract,
   type Result,
   type VerificationOptions,
+  type PortBinding, type UseCaseEntry, type UseCaseOptions,
 } from "./types.js";
 import { verifyLoadedFunction } from "./verify.js";
 import { FunctionGraph } from "./object-context.js";
@@ -11,6 +12,11 @@ import type { FunctionSource, ObjectSource, RegisteredObjectSource } from "./run
 import type { SourceSnapshot } from "./source-snapshot.js";
 import { verifyEffects } from "./effects/verify.js";
 import type { EffectIR } from "./effects/compiler.js";
+import {reportVerification} from "./report.js";
+import {verifyPortCases} from "./ports/verify.js";
+import {withSourceFile} from "./native.js";
+import {functionIdentity,isFunctionNode} from "./static.js";
+import {createHash} from "node:crypto";
 
 interface Registry {
   functions: WeakMap<Function, FunctionSource>;
@@ -24,6 +30,68 @@ const registry = (globalRegistry[registryKey] ??= {
   functions: new WeakMap(),
   objects: new WeakMap(),
 });
+const portBindings = new WeakMap<PortBinding,{receiver:object;key:string;fn:Function;contract:LeanContract;boundary?:string}>();
+
+/** Register an explicit adapter assumption without executing or wrapping it. */
+export function bindPort<T extends object>(receiver:T,key:keyof T & string,contract:LeanContract,options:{boundary?:string}={}):PortBinding {
+  if(!receiver || utilTypes.isProxy(receiver))throw new Failure("unsupported","Port receiver must be a non-Proxy object");
+  if(contract?.kind!=="ts2lean.contract"||contract.profile!=="port")throw new Failure("spec-error","Import a Lean port contract");
+  const fn=methodValue(receiver,key);
+  if(typeof fn!=="function"||utilTypes.isProxy(fn))throw new Failure("unsupported","Port requires a data method");
+  const binding=Object.freeze({kind:"ts2lean.port-binding" as const});
+  portBindings.set(binding,{receiver,key,fn,contract,boundary:options.boundary});
+  return binding;
+}
+
+/** Verify the supplied implementations and all finite serial combinations. */
+export function verifyUseCases(entries:readonly UseCaseEntry[],options:UseCaseOptions):Promise<Result> {
+  return reportVerification(entries[0]?.contract,options,setCheck=>verifyUseCasesInternal(entries,options,setCheck));
+}
+async function verifyUseCasesInternal(entries:readonly UseCaseEntry[],options:UseCaseOptions,setFinalCheck:(check:()=>void)=>void):Promise<Result> {
+  if(!entries.length)throw new Failure("unsupported","Supply at least one actual use-case function");
+  for(const entry of entries)if(typeof entry.fn!=="function"||entry.contract?.profile!=="use-case")
+    throw new Failure("spec-error","Each use-case requires an actual function and imported Lean use-case contract");
+  const bound=options.ports.map(binding=>{
+    const value=portBindings.get(binding);
+    if(!value)throw new Failure("assumption-mismatch","Port bindings must be created by bindPort");
+    return value;
+  });
+  if(bound.some((p,i)=>bound.some((q,j)=>i!==j&&p.receiver===q.receiver&&p.key===q.key)))
+    throw new Failure("assumption-mismatch","A receiver method may have only one port contract");
+  const checkMethods=()=>{
+    for(const p of bound)if(methodValue(p.receiver,p.key)!==p.fn)
+      throw new Failure("assumption-mismatch",`Bound port method changed: ${p.key}`);
+  };
+  checkMethods();
+  const receiverIds=new Map<object,string>(),methodIds=new Map<Function,string>();
+  const adapterEvidence=bound.map(p=>{
+    if(!receiverIds.has(p.receiver))receiverIds.set(p.receiver,`receiver${receiverIds.size}`);
+    if(!methodIds.has(p.fn))methodIds.set(p.fn,`method${methodIds.size}`);
+    const evidence:NonNullable<NonNullable<Result["assumptions"]>[number]["adapter"]>={key:p.key,receiverId:receiverIds.get(p.receiver)!,methodId:methodIds.get(p.fn)!,boundary:p.boundary};
+    const source=registry.functions.get(p.fn);
+    if(source) {
+      const text=source.snapshot.files[source.module];
+      if(text===undefined)throw new Failure("unsupported","Missing adapter snapshot source");
+      withSourceFile(source.module,text,sf=>{
+        const visit=(node:import("typescript/ast").Node):void=>{
+          if(isFunctionNode(node)&&functionIdentity(node)===source.name)evidence.source={
+            file:source.module,name:source.name,sha256:createHash("sha256").update(text).digest("hex"),snapshot:source.snapshot.id,
+            span:{start:node.getStart(),end:node.end,startLine:sf.getLineAndCharacterOfPosition(node.getStart()).line+1,endLine:sf.getLineAndCharacterOfPosition(node.end).line+1}};
+          node.forEachChild(visit);
+        };visit(sf);
+      });
+    }
+    if(!evidence.source&&!p.boundary?.trim())throw new Failure("assumption-mismatch",`Unregistered port method ${p.key} needs an explicit boundary description`);
+    return evidence;
+  });
+  const graph=new FunctionGraph(entries.map(e=>e.fn),registry,bound.map((p,index)=>({...p,index})));
+  const check=()=>{checkMethods();graph.check();};
+  setFinalCheck(check);
+  const result=await verifyPortCases(graph,entries,bound.map(p=>p.contract),options,check,adapterEvidence);
+  if(result.status!=="verified")throw new VerificationError(result);
+  check();
+  return result;
+}
 
 /** Generated snapshot modules freeze the exact inputs used to create their functions. */
 export function defineSourceSnapshot(source: SourceSnapshot): SourceSnapshot {
@@ -162,8 +230,10 @@ export async function verifyFunction(
   contract: LeanContract,
   options: VerificationOptions = {},
 ): Promise<Result> {
-  if (contract?.profile === "operation")
-    return verifySystem({ target: fn }, contract, options);
+  if (contract?.profile === "operation") return verifySystem({target:fn},contract,options);
+  return reportVerification(contract,options,setCheck=>verifyFunctionInternal(fn,contract,options,setCheck));
+}
+async function verifyFunctionInternal(fn:Function,contract:LeanContract,options:VerificationOptions,setFinalCheck:(check:()=>void)=>void):Promise<Result> {
   if (
     !contract ||
     contract.kind !== "ts2lean.contract" ||
@@ -175,6 +245,7 @@ export async function verifyFunction(
     );
   }
   const graph = new FunctionGraph([fn], registry);
+  setFinalCheck(()=>graph.check());
   const result = await verifyLoadedFunction(graph, contract, options);
   if (!result || result.status !== "verified")
     throw new VerificationError(
@@ -188,10 +259,14 @@ export async function verifyFunction(
   return result;
 }
 
-export async function verifySystem(
+export function verifySystem(entries:Record<string,Function>,contract:LeanContract,options:VerificationOptions={}):Promise<Result> {
+  return reportVerification(contract,options,setCheck=>verifySystemInternal(entries,contract,options,setCheck));
+}
+async function verifySystemInternal(
   entries: Record<string, Function>,
   contract: LeanContract,
-  options: VerificationOptions = {},
+  options: VerificationOptions,
+  setFinalCheck:(check:()=>void)=>void,
 ): Promise<Result> {
   if (
     !contract ||
@@ -242,5 +317,6 @@ export async function verifySystem(
   const result = await verifyEffects([], contract, options, check, graph);
   if (result.status !== "verified") throw new VerificationError(result);
   check(checkedIR!);
+  setFinalCheck(()=>check(checkedIR!));
   return result;
 }

@@ -11,6 +11,7 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 import {
   Failure,
   type ResolvedConfig,
@@ -74,6 +75,11 @@ export class LeanWorkspace {
   private compiled = new Set<string>();
   private building = new Set<string>();
   readonly env: NodeJS.ProcessEnv;
+  async sourceEvidence(): Promise<{file:string; sha256:string}[]> {
+    return Promise.all([...this.compiled].sort().map(async file => ({
+      file:path.relative(this.dir,file), sha256:createHash("sha256").update(await readFile(path.resolve(this.dir,file))).digest("hex"),
+    })));
+  }
   constructor(
     readonly config: ResolvedConfig,
     readonly dir: string,
@@ -260,8 +266,8 @@ export class LeanWorkspace {
           "unsupported",
           "Contract names must be simple identifiers.",
         );
-      if (kind === "pure") {
-        infos.push(await this.inspect(spec, name));
+      if (kind === "pure" || kind === "state-machine" || kind === "port" || kind === "use-case") {
+        infos.push({...await this.inspect(spec, name, kind === "port" || kind === "use-case"), kind});
         continue;
       }
       await writeFile(
@@ -289,14 +295,14 @@ export class LeanWorkspace {
     }
     return infos;
   }
-  async inspect(spec: string, contract: string): Promise<ContractInfo> {
+  async inspect(spec: string, contract: string, ports = false): Promise<ContractInfo> {
     const module = this.module(spec);
     await this.compile("Ts2Lean/Inspect.lean");
     await this.compile(this.specificationPath(spec));
     const filename = path.join(this.dir, "InspectContract.lean");
     await writeFile(
       filename,
-      `import Ts2Lean.Inspect\nimport ${module}\n#ts2lean_contract ${contract}\n#ts2lean_audit ${contract}\n`,
+      `import Ts2Lean.Inspect\nimport ${module}\n#ts2lean_${ports ? "ports_contract" : "contract"} ${contract}\n#ts2lean_audit ${contract}\n`,
     );
     const result = await this.exec([filename]);
     if (result.code !== 0) throw new Failure("spec-error", result.output);
@@ -355,6 +361,10 @@ export class LeanWorkspace {
       }
     };
     validate(info.input);
+    if (info.world && Object.values(info.world).some(n=>!/^[A-Za-z_]\w*(\.[A-Za-z_]\w*)*$/.test(n)))
+      throw new Failure("unsupported", "World types need simple monomorphic Lean names");
+    if (info.world && info.world.error !== "PUnit")
+      throw new Failure("unsupported", "Exception payloads are opaque in this profile; use Unit as the exception abstraction");
     validate(info.output);
     for (const shape of info.supportingTypes ?? []) validate(shape);
     return info;

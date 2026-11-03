@@ -134,13 +134,30 @@ export default defineConfig({plugins:[ts2lean()],test:{testTimeout:90000}});
 `);
   await writeFile(path.join(dir, "tsconfig.json"), JSON.stringify({
     compilerOptions: {strict:true,target:"ES2022",module:"ESNext",moduleResolution:"bundler",noEmit:true,types:["node"],skipLibCheck:true},
-    contentMappers:[{package:"@fyuuki0jp/ts2lean",extensions:[".lean"]}], include:["*.ts", "result-example/*.ts"],
+    contentMappers:[{package:"@fyuuki0jp/ts2lean",extensions:[".lean"]}], include:["*.ts", "result-example/*.ts", "machine-example/*.ts", "ports-example/*.ts"],
   }));
   const resultDir = path.join(dir, "result-example");
   await mkdir(resultDir);
   for (const file of ["Result.lean", "main.ts", "result.ts", "result.test.ts"]) {
     await writeFile(path.join(resultDir, file), await readFile(path.join(root, "examples/result", file)));
   }
+  const machineDir=path.join(dir,"machine-example"),portsDir=path.join(dir,"ports-example");
+  await mkdir(machineDir); await mkdir(portsDir);
+  for(const file of ["Machine.lean","reducer.ts","reducer.test.ts"])
+    await writeFile(path.join(machineDir,file),await readFile(path.join(root,"examples/state-machine",file)));
+  for(const file of ["Save.lean","service.ts"])
+    await writeFile(path.join(portsDir,file),await readFile(path.join(root,"examples/ports",file)));
+  await writeFile(path.join(portsDir,"ports.test.ts"),`import {test,expect} from "vitest";
+import {bindPort,verifyUseCases} from "@fyuuki0jp/ts2lean";
+import {authorization,storage,save} from "./Save.lean";
+import {createService,type Ports} from "./service";
+const adapter:Ports={async authorize(i){return i.allowed?{ok:true,value:0n}:{ok:false,error:{kind:"denied"}};},async commit(i){return {ok:true,value:i.amount};}};
+test("installed package verifies general ports and emits adapter evidence",async()=>{
+ const result=await verifyUseCases([{fn:createService(adapter).saveViaHelper,contract:save}],{ports:[bindPort(adapter,"authorize",authorization),bindPort(adapter,"commit",storage)]});
+ expect(result.status).toBe("verified");
+ expect(result.assumptions!.every(p=>p.adapter?.source?.sha256)).toBe(true);
+});
+`);
   const localElan = path.join(root, ".tools/elan");
   const env = {...process.env};
   if (!env.TS2LEAN_LEAN && existsSync(path.join(localElan,"bin/lean"))) {
@@ -150,7 +167,7 @@ export default defineConfig({plugins:[ts2lean()],test:{testTimeout:90000}});
   for (const args of [
     ["node_modules/typescript/bin/tsc", "--runExternalCode", "-p", "tsconfig.json"],
     ["node_modules/vitest/vitest.mjs", "run"],
-  ]) process.stdout.write(execFileSync(process.execPath,args,{cwd:dir,env,encoding:"utf8",timeout:180000}));
+  ]) process.stdout.write(execFileSync(process.execPath,args,{cwd:dir,env,encoding:"utf8",timeout:300000}));
   console.log("scoped devDependency: external Content Mapper and Vitest proof passed");
 } finally {
   await rm(dir, { recursive: true, force: true });

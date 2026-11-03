@@ -1,5 +1,7 @@
 import Lean
 import Lean.Elab.Tactic.Omega
+import Ts2Lean.JSString
+import Ts2Lean.StateMachine
 
 namespace Ts2Lean
 

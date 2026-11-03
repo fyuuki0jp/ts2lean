@@ -51,7 +51,8 @@ export type StaticValue =
   | StaticFunction
   | StaticObject
   | StaticScalar
-  | StaticExternal;
+  | StaticExternal
+  | {kind:"port"; index:number};
 export type StaticEnv = Map<CompilerSymbol, StaticValue>;
 export interface CompositionCheck {
   source: string;

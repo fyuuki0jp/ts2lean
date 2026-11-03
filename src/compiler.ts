@@ -44,6 +44,7 @@ export type Expr = { shape: Shape } & (
   | { kind: "conditional"; condition: Expr; yes: Expr; no: Expr }
 );
 export type Term =
+  | {kind:"await"; name:string; call:{kind:"port"|"function"; target:string; argument:Expr; output:Shape}; next:Term}
   | {
       kind: "match";
       object: Expr;
@@ -53,7 +54,10 @@ export type Term =
   | { kind: "let"; name: string; value: Expr; next: Term }
   | { kind: "if"; condition: Expr; yes: Term; no: Term };
 export interface FunctionIR {
+  async?: boolean;
   localName: string;
+  sourceHash: string;
+  span: {start:number; end:number; startLine:number; endLine:number};
   captures?: { reference: string; type: "int" | "bool"; value: string }[];
   calls: { target: string; reference: string }[];
   name: string;
@@ -103,12 +107,12 @@ export function compileTypeScript(
 }
 
 /** Lower the loaded instance using its own immutable type context. */
-export function compileFunctionObject(runtime: ObjectCompilation, contract: ContractInfo): ModuleIR {
+export function compileFunctionObject(runtime: ObjectCompilation, contract: ContractInfo, ports?: ContractInfo[]): ModuleIR {
   const root = runtime.roots[0]!;
   const context = runtime.context(root);
   return lowerTypeScript(root.node.getSourceFile().fileName, "", contract,
     new Map([...context.declarations.keys()].map((file) => [file + ".ts", ""])),
-    context.program, context.checker, runtime);
+    context.program, context.checker, runtime, ports);
 }
 
 function lowerTypeScript(
@@ -119,6 +123,7 @@ function lowerTypeScript(
   program: Program,
   checker: Checker,
   runtime?: ObjectCompilation,
+  ports?: ContractInfo[],
 ): ModuleIR {
   const records = new Map<string, Extract<Shape, { kind: "record" }>>();
   const generated: Extract<Shape, { kind: "record" }>[] = [];
@@ -151,6 +156,10 @@ function lowerTypeScript(
   register(contract.input);
   register(contract.output);
   for (const shape of contract.supportingTypes ?? []) register(shape);
+  for (const port of ports ?? []) {
+    register(port.input); register(port.output);
+    for (const shape of port.supportingTypes ?? []) register(shape);
+  }
   const fail = (node: ts.Node, message: string): never => {
     const sf = node.getSourceFile(),
       pos = sf.getLineAndCharacterOfPosition(node.getStart());
@@ -183,14 +192,15 @@ function lowerTypeScript(
       return binding;
     }
     if (type.flags & TypeFlags.Never) return {kind:"never"};
+    if (type.flags & TypeFlags.Undefined) return {kind:"unit"};
     if (type.isBooleanLiteralType())
       return {kind:"literal", value:type.value};
     if (type.flags & TypeFlags.BooleanLike) return bool;
     if (type.isStringLiteralType()) {
-      if (!/^[A-Za-z_]\w*$/.test(type.value))
-        return fail(node, "Union tags must be simple identifiers");
+      if (!/^[A-Za-z_]\w*$/.test(type.value)) return {kind:"jsstring"};
       return { kind: "literal", value: type.value };
     }
+    if (type.flags & TypeFlags.String) return {kind:"jsstring"};
     if (type.isUnionType()) {
       const members = type.getTypes().map((t) => {
         const r = typeShape(t, node, seen);
@@ -222,7 +232,7 @@ function lowerTypeScript(
     )
       return fail(
         node,
-        `Only bigint, boolean, and readonly records are supported; got ${checker.typeToString(type)}.`,
+        `Expected a supported bigint, boolean, string, undefined, or readonly data type; got ${checker.typeToString(type)}.`,
       );
     if (seen.has(type)) return fail(node, "Recursive records are unsupported.");
     if (
@@ -277,7 +287,7 @@ function lowerTypeScript(
     if (s.flags & SymbolFlags.Alias) s = checker.getAliasedSymbol(s);
     return s;
   };
-  const statics = staticResolver(checker, fail, {allowGenerics:true});
+  const statics = staticResolver(checker, fail, {allowGenerics:true,allowAsync:!!ports});
   const sourceFiles = program
     .getSourceFileNames()
     .map((file) => program.getSourceFile(file)!)
@@ -362,7 +372,7 @@ function lowerTypeScript(
       return fail(node, "Recursive calls are unsupported");
     compiling.add(value);
     statics.validateFunction(node);
-    if (!node.parameters.length)
+    if (!node.parameters.length && !ports)
       return fail(
         node,
         "Verified functions require at least one data input",
@@ -374,12 +384,14 @@ function lowerTypeScript(
       return { name: p.name.text, shape: typeShape(checker.getTypeAtLocation(p), p) };
     }) : undefined;
     const signature = checker.getSignatureFromDeclaration(node)!;
+    const asyncFunction = !!node.modifiers?.some(m=>m.kind===ts.SyntaxKind.AsyncKeyword);
+    const returnedType = checker.getReturnTypeOfSignature(signature);
     const fn = {
       node,
       name: `fn${functionSerial++}`,
       parameter: "v0",
-      input: parameterFields ? intern(parameterFields) : typeShape(checker.getTypeAtLocation(parameter), parameter),
-      output: typeShape(checker.getReturnTypeOfSignature(signature), node),
+      input: parameterFields ? intern(parameterFields) : parameter ? typeShape(checker.getTypeAtLocation(parameter), parameter) : {kind:"unit"} as Shape,
+      output: typeShape(asyncFunction ? checker.getAwaitedType(returnedType)! : returnedType, node),
     };
     if (fn.input.kind === "never" || fn.output.kind === "never")
       return fail(node, "Uninhabited function signatures are unsupported");
@@ -429,7 +441,7 @@ function lowerTypeScript(
         kind: "field", object: input, name: parameterFields[i]!.name,
         shape: parameterFields[i]!.shape,
       }, locals));
-    else bindData(parameter.name, input, locals);
+    else if(parameter) bindData(parameter.name, input, locals);
     const mutable = new Set<CompilerSymbol>(locals.keys());
     const captures = new Map<
       string,
@@ -439,6 +451,8 @@ function lowerTypeScript(
     const calls = new Map<string, { target: string; reference: string }>();
     const coerce = (expr: Expr, target: Shape, at: ts.Node): Expr => {
       if (shapeKey(expr.shape) === shapeKey(target)) return expr;
+      if (target.kind === "jsstring" && expr.shape.kind === "literal" && typeof expr.shape.value === "string")
+        return {kind:"literal", value:expr.shape.value, shape:target};
       if (target.kind === "bool" && booleanShape(expr.shape)) return {...expr, shape:target};
       if (target.kind === "literal")
         return fail(at, "Literal payload must retain the exact declared value");
@@ -534,14 +548,14 @@ function lowerTypeScript(
       scope: typeof locals,
       expected?: Shape,
     ): Expr => {
+      if (ts.isIdentifier(node) && node.text === "undefined" && !symbol(node).valueDeclaration)
+        return {kind:"literal",value:"()",shape:{kind:"unit"}};
       if (ts.isParenthesizedExpression(node) || ts.isSatisfiesExpression(node))
         return expression(node.expression, scope, expected);
-      if (ts.isStringLiteral(node)) {
-        if (!/^[A-Za-z_]\w*$/.test(node.text))
-          return fail(node, "Union tags must be simple identifiers");
+      if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
         return {
           kind: "literal",
-          shape: { kind: "literal", value: node.text },
+          shape: /^[A-Za-z_]\w*$/.test(node.text) ? { kind: "literal", value: node.text } : {kind:"jsstring"},
           value: node.text,
         };
       }
@@ -688,7 +702,7 @@ function lowerTypeScript(
           ].includes(operator)
         )
           return fail(node, `Unsupported operator: ${operator}`);
-        const left = expression(node.left, scope);
+        let left = expression(node.left, scope);
         if (
           ["&&", "||"].includes(operator) &&
           left.kind === "literal" &&
@@ -703,7 +717,11 @@ function lowerTypeScript(
           same(right.shape, bool, node);
           return right;
         }
-        const right = expression(node.right, scope);
+        let right = expression(node.right, scope);
+        if (["===", "!=="].includes(operator)) {
+          if (left.shape.kind === "jsstring") right = coerce(right, left.shape, node.right);
+          if (right.shape.kind === "jsstring") left = coerce(left, right.shape, node.left);
+        }
         if (
           ["===", "!=="].includes(operator) &&
           left.shape.kind === "literal" &&
@@ -800,7 +818,7 @@ function lowerTypeScript(
             const field = (callee.input as Extract<Shape, {kind: "record"}>).fields.find(f => f.name === name)!;
             return { name, value: coerce(expression(node.arguments[i]!, scope, field.shape), field.shape, node.arguments[i]!) };
           }),
-        } : coerce(
+        } : !node.arguments.length ? {kind:"literal",shape:{kind:"unit"},value:"()"} : coerce(
           expression(node.arguments[0]!, scope, callee.input),
           callee.input,
           node,
@@ -818,6 +836,49 @@ function lowerTypeScript(
       }
       return fail(node, `Unsupported expression: ${ts.SyntaxKind[node.kind]}`);
     };
+    const awaited = (node: ts.AwaitExpression, scope: typeof locals): Extract<Term,{kind:"await"}>["call"] => {
+      if (!ports || !runtime || !asyncFunction) return fail(node,"Await requires a verified async use-case");
+      const call = node.expression;
+      if (!ts.isCallExpression(call) || call.arguments.some(ts.isSpreadElement))
+        return fail(node,"Await a direct port or async helper call with pure arguments");
+      const resolved = runtime.resolve(value, call.expression);
+      const signature = checker.getResolvedSignature(call);
+      if (!signature) return fail(call,"Unresolved awaited call signature");
+      const params = signature.getParameters();
+      if (params.length !== call.arguments.length) return fail(call,"Awaited calls require all declared arguments");
+      const outputType = checker.getAwaitedType(checker.getReturnTypeOfSignature(signature));
+      if (!outputType) return fail(call,"Unsupported promise/thenable result");
+      const output = typeShape(outputType,call);
+      const argumentShape = params.length === 0 ? {kind:"unit"} as Shape : params.length===1
+        ? typeShape(checker.getParameterType(signature,0),call)
+        : intern(params.map((p,i)=>({name:p.name,shape:typeShape(checker.getParameterType(signature,i),call)})));
+      let target: string, kind: "port"|"function", expectedInput: Shape, expectedOutput:Shape;
+      if (resolved.kind === "port") {
+        const port=ports[resolved.index];
+        if (!port) return fail(call,"Missing bound port contract");
+        target=port.name; kind="port"; expectedInput=port.input; expectedOutput=port.output;
+      } else if (resolved.kind === "function") {
+        if (!resolved.node.modifiers?.some(m=>m.kind===ts.SyntaxKind.AsyncKeyword))
+          return fail(call,"Awaited helpers must be declared async; pure helpers are ordinary calls");
+        const types=(resolved.node.typeParameters??[]).map((_,i)=> {
+          const t=call.typeArguments?.[i];
+          if(!t)return fail(call,"Async generic helpers require explicit concrete type arguments");
+          return typeShape(checker.getTypeFromTypeNode(t),t);
+        });
+        const callee=compileFunction(resolved,types);
+        dependencies.add(callee.name);
+        calls.set(call.expression.getText(),{target:callee.name,reference:call.expression.getText()});
+        target=callee.name; kind="function"; expectedInput=callee.input;expectedOutput=callee.output;
+      } else return fail(call,"Await target must be an explicitly bound port or registered async helper");
+      same(argumentShape,expectedInput,call); same(output,expectedOutput,call);
+      const argument:Expr = params.length===0 ? {kind:"literal",shape:{kind:"unit"},value:"()"} : params.length===1
+        ? coerce(expression(call.arguments[0]!,scope,expectedInput),expectedInput,call)
+        : {kind:"record",shape:expectedInput,fields:params.map((p,i)=>{
+          const field=(expectedInput as Extract<Shape,{kind:"record"}>).fields.find(f=>f.name===p.name)!;
+          return {name:p.name,value:coerce(expression(call.arguments[i]!,scope,field.shape),field.shape,call)};
+        })};
+      return {kind,target,argument,output:expectedOutput};
+    };
     // A continuation captures the enclosing scope. Early returns never evaluate it.
     const sequence = (
       statements: readonly ts.Statement[],
@@ -833,9 +894,17 @@ function lowerTypeScript(
       const next = (updated: typeof locals = scope): Term =>
         sequence(rest, project(updated), continuation);
       if (ts.isReturnStatement(st)) {
-        if (!st.expression) return fail(st, "Return a value.");
+        if (!st.expression) {
+          if(fn.output.kind !== "unit")return fail(st,"Return a value.");
+          if(rest.length)return fail(rest[0]!,"Unreachable statements are unsupported.");
+          return {kind:"return",value:{kind:"literal",shape:{kind:"unit"},value:"()"}};
+        }
         if (rest.length)
           return fail(rest[0]!, "Unreachable statements are unsupported.");
+        if (ts.isAwaitExpression(st.expression)) {
+          const call=awaited(st.expression,scope), name=`v${counter++}`;
+          return {kind:"await",call,name,next:{kind:"return",value:coerce({kind:"variable",name,shape:call.output},fn.output,st)}};
+        }
         const value = coerce(
           expression(st.expression, scope, fn.output),
           fn.output,
@@ -854,6 +923,14 @@ function lowerTypeScript(
           const declared = d.type
             ? typeShape(checker.getTypeFromTypeNode(d.type), d.type)
             : undefined;
+          if (ts.isAwaitExpression(d.initializer)) {
+            const call=awaited(d.initializer,inner),name=`v${counter++}`;
+            if(declared)same(call.output,declared,d);
+            bindData(d.name,{kind:"variable",name,shape:call.output},inner);
+            if (!(st.declarationList.flags & ts.NodeFlags.Const))
+              for (const key of inner.keys()) if(!scope.has(key))mutable.add(key);
+            return {name,call};
+          }
           let value = expression(d.initializer, inner, declared);
           if (declared) value = coerce(value, declared, d);
           const name = `v${counter++}`;
@@ -868,12 +945,13 @@ function lowerTypeScript(
           return { name, value };
         });
         return bindings.reduceRight<Term>(
-          (next, b) => ({ kind: "let", ...b, next }),
+          (next, b) => b.call ? {kind:"await",name:b.name,call:b.call,next} : ({ kind: "let", name:b.name,value:b.value!, next }),
           sequence(rest, inner, continuation),
         );
       }
       if (ts.isExpressionStatement(st)) {
         const e = st.expression;
+        if (ts.isAwaitExpression(e)) return {kind:"await",name:`v${counter++}`,call:awaited(e,scope),next:next()};
         let target: ts.Expression, value: Expr;
         if (
           ts.isBinaryExpression(e) &&
@@ -967,7 +1045,8 @@ function lowerTypeScript(
     };
     const body = ts.isBlock(fn.node.body!)
       ? sequence((fn.node.body as ts.Block).statements, locals, () =>
-          fail(fn.node, "Every control-flow path must return a value"),
+          fn.output.kind === "unit" ? {kind:"return",value:{kind:"literal",value:"()",shape:fn.output}}
+          : fail(fn.node, "Every control-flow path must return a value"),
         )
       : {
           kind: "return" as const,
@@ -979,8 +1058,13 @@ function lowerTypeScript(
         };
     if (body.kind === "return") same(body.value.shape, fn.output, node);
     const result: FunctionIR = {
+      async:asyncFunction,
       name: fn.name,
       source: node.getSourceFile().fileName,
+      sourceHash: createHash("sha256").update(node.getSourceFile().text).digest("hex"),
+      span: {start:node.getStart(), end:node.end,
+        startLine:node.getSourceFile().getLineAndCharacterOfPosition(node.getStart()).line + 1,
+        endLine:node.getSourceFile().getLineAndCharacterOfPosition(node.end).line + 1},
       parameter: fn.parameter,
       ...(parameterFields ? { parameterNames: parameterFields.map(p => p.name) } : {}),
       input: fn.input,
@@ -1002,6 +1086,11 @@ function lowerTypeScript(
     } finally { program = previousProgram; checker = previousChecker; typeBindings = previousBindings; }
   };
   const target = compileFunction(targetValue as StaticFunction);
+  if(contract.kind==="state-machine") {
+    const field=target.input.kind==="record"&&target.input.fields.find(f=>f.name==="state");
+    if(!field||shapeKey(field.shape)!==shapeKey(target.output))
+      throw new Failure("type-error","A reducer must accept an actual state field/parameter matching its output state type");
+  }
   if (
     shapeKey(target.input) !== shapeKey(contract.input) ||
     shapeKey(target.output) !== shapeKey(contract.output)

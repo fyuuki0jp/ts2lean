@@ -128,3 +128,26 @@ JavaScriptから得た返値・タグ・payload、およびcallbackの完了・�
 booleanタグの分岐はLeanのconstructor別のmatchへ変換します。`if (!step.ok) return step;`の失敗分岐には後続処理を接続しません。異なる具体Resultへの失敗返却は、タグとpayloadの互換性を検査して対応するconstructorへ再構築します。これは値の保持であり、JavaScriptオブジェクトのidentityの証明ではありません。
 
 [最小例](../examples/result/README.md)はboolean成功値・kind union成功値・kind unionエラー・成功payloadの次段への受け渡しを含みます。`test/result.test.mjs`の変異テスト、JavaScript／Lean比較、Vitestの実関数検証、Content Mapper型検査、配布tarballでの実行を確認します。一般文字列・Errorクラス・任意の外部副作用はこの対応に含めません。
+
+
+## 0.2: UTF-16文字列、状態機械、汎用ポート
+
+`Ts2Lean.JSString`は`List UInt16`を保持し、通常のTypeScript `string`へ対応します。`===`/`!==`・返値・record payloadに対応し、孤立surrogateもそのまま保存します。LeanのUnicode scalar文字列への変換や正規化は行いません。これは[ECMAScript String型](https://tc39.es/ecma262/multipage/ecmascript-data-types-and-values.html#sec-ecmascript-language-types-string-type)のcode unit列に合わせたモデルです。一般の文字列演算・UTF-8への変換・locale比較は未対応です。
+
+`Ts2Lean.StateMachine`と`toPreserveInvariant`で、実reducerの生成遷移に初期状態と1-step保存を接続できます。契約のstate射影は実入力の`state`フィールドと一致しなければなりません。[最小例](../examples/state-machine/README.md)。初期述語と実initializerの接続は別契約です。
+
+`Ts2Lean.Ports.PortContract`と`UseCase`はledger以外の任意の明示的なポート遷移を扱います。[APIと逐次保証の範囲](../examples/ports/README.md)。ポートは満たせる返値・同期throw・Promise rejectionを持つ関係として定義します。各外部法則は結び付けたreceiverとメソッドだけに適用し、アダプターrefinementは仮定として報告します。変換された本番関数の全completion・トレース・状態を検査し、複数entryの任意有限の直列呼出しへ接続します。呼出し中断・クラッシュ・並行interleavingや動的generator合成の証明ではありません。
+
+nullable/optional、readonly配列、`JSON.stringify`、IEEE754 number、任意generic carrierは今後の対応です。Unitは実値`undefined`だけを表し、`void`入力/返値は拒否します。TypeScriptの`void`は「返値を無視する」型でもあり、実値が常にundefinedとは限らないためです。
+
+## 検証レポートとカバー率への接続
+
+Vitestのmatcherを変えず、Viteプラグインに`report: { directory: ".ts2lean/reports", runId: "audit-20261103" }`を設定できます。同じオプションは個別の検証呼出しにも渡せます。プロセス単位では`TS2LEAN_REPORT_DIR`と`TS2LEAN_RUN_ID`でも指定できます。runIdは実行のたびに利用側が新しく発行してください。
+
+`directory/runId/<invocation UUID>.json`へ、schemaVersion/runId/invocationId/時刻とResult全体を保存します。失敗も保存し、`verified`は最後のcapture・adapter照合の後にだけ公開します。JSONは一時ファイルから同期renameし、不完全なファイルを公開しません。出力に失敗した場合は検証呼出しも失敗します。プロセスの強制終了ではレポートがない場合があり、未実行・未完了を成功扱いしてはいけません。
+
+`evidence`には契約、実関数path・span・ファイルSHA-256・snapshot・instance、検査したLeanソースのhashがあります。複数use-caseでは全契約と生成targetの対応も含みます。`assumptions[].adapter`はkey・receiver/method ID・取得可能なソース情報または明示した外部境界です。アダプターのソースを報告してもその本体を証明済みにはしません。
+
+spanは翻訳した関数の識別情報であり、ファイル全体・すべてのstatement/branch・別capture環境を加点する根拠ではありません。各`status`と現行ソースhashを照合し、最内function・対象の具体化・契約の前提・adapter仮定・実initializerの接続・業務成功/拒否の到達可能性を利用側のscope auditで区別してください。外部ポートが常にResult.errを返すモデルでは正常成功分岐は到達しません。このAPIは成功到達可能性や全体カバー率を自動で保証しません。
+
+レポートは証明対象の具体化を識別するための証拠です。同じ関数の別capture値・別依存・別ポートbindingへ結果を流用してはいけません。単一の成功Resultから、対応していない入力型や別実装まで「全入力を検証済み」と拡張することもできません。

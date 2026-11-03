@@ -1,4 +1,5 @@
 import Ts2Lean.Modules
+import Ts2Lean.Ports
 
 open Lean Meta Elab Command
 
@@ -8,6 +9,8 @@ private partial def shape (type : Expr) (seen : List Name := []) : MetaM Json :=
   let type ← whnf type
   if type.isConstOf ``Int then return Json.mkObj [("kind", toJson "int")]
   if type.isConstOf ``Bool then return Json.mkObj [("kind", toJson "bool")]
+  if type.isConstOf ``JSString then return Json.mkObj [("kind", toJson "jsstring")]
+  if type.isConstOf ``PUnit then return Json.mkObj [("kind", toJson "unit")]
   let .const name _ := type | throwError "Only Int, Bool, and monomorphic structures are supported: {type}"
   if seen.contains name then throwError "Recursive structures are unsupported: {name}"
   let env ← getEnv
@@ -67,10 +70,31 @@ private partial def userDefinitions (name : Name) (seen : Array Name := #[]) : M
 elab "#ts2lean_contract " id:ident : command => liftTermElabM do
   let e ← Elab.Term.elabTerm id none
   let t ← whnf (← inferType e)
-  if !t.isAppOfArity ``Contract 2 then throwError "Expected Ts2Lean.Contract, got {t}"
+  if !t.isAppOfArity ``Contract 2 && !t.isAppOfArity ``StateMachine 2 then
+    throwError "Expected Ts2Lean.Contract or StateMachine, got {t}"
   let args := t.getAppArgs
   let supportingTypes ← (boolUnionMappings.getState (← getEnv)).mapM fun entry => shape (mkConst entry.1)
   let json := Json.mkObj [("supportingTypes", Json.arr supportingTypes), ("name", toJson id.getId.toString), ("unfold", toJson ((← userDefinitions e.constName!).map Name.toString)), ("input", ← shape args[0]!), ("output", ← shape args[1]!)]
+  logInfo m!"TS2LEAN_CONTRACT:{json.compress}"
+
+elab "#ts2lean_ports_contract " id:ident : command => liftTermElabM do
+  let e ← Elab.Term.elabTerm id none
+  let t ← whnf (← inferType e)
+  if !t.isAppOfArity ``Ports.PortContract 5 && !t.isAppOfArity ``Ports.UseCase 5 then
+    throwError "Expected a port or use-case contract"
+  let args := t.getAppArgs
+  let typeName (a : Expr) : MetaM String := do
+    let a ← whnf a
+    let .const name _ := a | throwError "State, event and exception types must be monomorphic: {a}"
+    return name.toString
+  let supportingTypes ← (boolUnionMappings.getState (← getEnv)).mapM fun entry => shape (mkConst entry.1)
+  let json := Json.mkObj [
+    ("name", toJson id.getId.toString),
+    ("unfold", toJson ((← userDefinitions e.constName!).map Name.toString)),
+    ("supportingTypes", Json.arr supportingTypes),
+    ("input", ← shape args[3]!), ("output", ← shape args[4]!),
+    ("world", Json.mkObj [("state", toJson (← typeName args[0]!)),
+      ("event", toJson (← typeName args[1]!)), ("error", toJson (← typeName args[2]!))])]
   logInfo m!"TS2LEAN_CONTRACT:{json.compress}"
 
 /-- Find contracts declared in the imported source module, using Lean's environment. -/
@@ -83,6 +107,9 @@ elab "#ts2lean_contracts " moduleName:ident : command => liftTermElabM do
     if isPrivateName name then continue
     let t ← whnf info.type
     let kind := if t.isAppOfArity ``Contract 2 then "pure"
+      else if t.isAppOfArity ``StateMachine 2 then "state-machine"
+      else if t.isAppOfArity ``Ports.PortContract 5 then "port"
+      else if t.isAppOfArity ``Ports.UseCase 5 then "use-case"
       else if t.isConstOf ``ModuleContract then "module"
       else if t.isConstOf ``Ledger.SystemContract then "system"
       else if t.isConstOf ``Ledger.OperationContract then "operation" else ""

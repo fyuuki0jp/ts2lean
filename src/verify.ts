@@ -2,6 +2,7 @@ import { createProject } from "./project.js";
 import type { FunctionGraph } from "./object-context.js";
 import { moduleTypes, effectTypes } from "./module-types.js";
 import path from "node:path";
+import {createHash} from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import { LeanWorkspace } from "./lean.js";
 import {
@@ -10,7 +11,7 @@ import {
   importedLeanFiles,
   type ModuleIR,
 } from "./compiler.js";
-import { emitModel, emitProof } from "./emit.js";
+import { emitModel, emitProof, emitStateMachineProof } from "./emit.js";
 import {
   Failure,
   tsType,
@@ -93,7 +94,7 @@ export function contractTypes(infos: ContractInfo[]): string {
         if (c.kind === "module") return moduleTypes(c);
         if (c.kind === "operation" || c.kind === "system")
           return effectTypes(c);
-        return `export type ${name} = { readonly input: ${tsType(c.input)}; readonly output: ${tsType(c.output)} };\nexport declare const ${name}: { readonly kind: "ts2lean.contract"; readonly spec: string; readonly name: string; readonly root: string; readonly options: {}; readonly types?: ${name} };`;
+        return `export type ${name} = { readonly input: ${tsType(c.input)}; readonly output: ${tsType(c.output)} };\nexport declare const ${name}: { readonly kind: "ts2lean.contract"; readonly profile: "${c.kind ?? "pure"}"; readonly spec: string; readonly name: string; readonly root: string; readonly options: {}; readonly types?: ${name} };`;
       })
       .join("\n") + "\n"
   );
@@ -160,22 +161,33 @@ async function proveModule(
   await writeFile(model, emitModel(ir, ws.module(binding.spec)));
   await writeFile(path.join(ws.dir, "ir.json"), JSON.stringify(ir, null, 2) + "\n");
   await ws.compile("Model.lean");
+  const evidence: NonNullable<Result["evidence"]> = {
+    profile:target.kind ?? "pure", contract:{file:path.resolve(ws.config.root,binding.spec), name:binding.contract},
+    leanSources:await ws.sourceEvidence(),
+    functions:ir.functions.map(f=>({file:f.source,name:f.localName,sha256:f.sourceHash,
+      modelName:`Ts2LeanGenerated.${f.name}`,modelSha256:createHash("sha256").update(JSON.stringify(f)).digest("hex"),captures:f.captures,
+      span:f.span,snapshot:f.snapshot,instance:f.instance})),
+  };
   if (mode === "extract") return {
     status: "extracted", module: binding.module, export: binding.export,
-    message: "Lean model generated and typechecked; no proof has been claimed.", artifact: model,
+    message: "Lean model generated and typechecked; no proof has been claimed.", artifact: model, evidence,
   };
   const proof = path.join(ws.dir, "Proof.lean");
-  await writeFile(proof, emitProof(ir, binding.contract, ws.config.maxHeartbeats, target.unfold));
+  const emit = target.kind === "state-machine" ? emitStateMachineProof : emitProof;
+  await writeFile(proof, emit(ir, binding.contract, ws.config.maxHeartbeats, target.unfold));
   const outcome = await ws.exec([proof]);
   if (outcome.code !== 0 || outcome.output.includes("declaration uses `sorry`"))
     return { status: "unproved", module: binding.module, export: binding.export,
-      message: outcome.output, artifact: proof };
+      message: outcome.output, artifact: proof, evidence };
   const line = outcome.output.split("\n").find((l) => l.includes("TS2LEAN_AXIOMS:"));
   if (!line) throw new Failure("tool-error", "Proof finished without an axiom audit.");
-  const axioms = JSON.parse(line.slice(line.indexOf("TS2LEAN_AXIOMS:") + 15)) as string[];
+  const axioms = [...new Set(outcome.output.split("\n").filter(l=>l.includes("TS2LEAN_AXIOMS:"))
+    .flatMap(l=>JSON.parse(l.slice(l.indexOf("TS2LEAN_AXIOMS:")+15)) as string[]))];
   check?.(ir);
   return { status: "verified", module: binding.module, export: binding.export,
-    message: "Lean checked the generated model and its axiom dependencies.", artifact: proof, axioms };
+    message: target.kind === "state-machine"
+      ? "Lean checked nonempty initial states, initial safety, preservation by the actual reducer, and arbitrary finite operation sequences."
+      : "Lean checked the generated model and its axiom dependencies.", artifact: proof, axioms, evidence };
 }
 
 export async function verifyLoadedFunction(
@@ -189,7 +201,7 @@ export async function verifyLoadedFunction(
     const config = createProject(contract.root, { ...contract.options, ...options });
     const ws = await LeanWorkspace.create(config, undefined, contract.sources);
     const target = (await ws.discover(contract.spec)).find((info) => info.name === contract.name);
-    if (!target || (target.kind && target.kind !== "pure"))
+    if (!target || (target.kind && target.kind !== "pure" && target.kind !== "state-machine"))
       throw new Failure("spec-error", "Expected a pure function contract");
     const contexts = await graph.prepare(config);
     const ir = graph.compile(contexts, (session) => compileFunctionObject(session, target));
